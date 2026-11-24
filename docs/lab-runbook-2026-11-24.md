@@ -16,6 +16,8 @@ Router / gateway 192.168.1.254
 
 The Razer also has Wi-Fi `192.168.1.97`; use the wired address `192.168.1.111` for Spark. The gateway is not a Spark node. Connect the router and both computers to the switch, and keep both nodes on the same LAN.
 
+Observed hardware: the Razer has 16 logical CPUs and 14 GiB RAM; the ASUS has a Ryzen 5 3550H (8 logical CPUs), 15 GiB RAM, and 37 GiB free disk. The current Ethernet links negotiate at **100 Mb/s** on both machines. A Gigabit switch, gigabit-capable ports, and Cat5e/Cat6 cables would reduce staging time; verify with `cat /sys/class/net/<wired-interface>/speed` after rewiring.
+
 ## ASUS: enable the first SSH connection
 
 The Razer can ping `192.168.1.100` and the ASUS now accepts SSH from the Razer. Open a terminal on the ASUS and run the following to install the worker runtime and utilities:
@@ -42,6 +44,20 @@ ssh asus 'hostname; whoami; java -version; ip -brief -4 address'
 ```
 
 For other controllers and worker accounts, use the generic key and alias instructions in [`ssh-access.md`](ssh-access.md); each teammate should set their own IP addresses and Linux usernames in their local `~/.ssh/config`.
+
+For this lab, set `cluster.env` to the observed addresses and leave memory for the OS:
+
+```bash
+MASTER_HOST=192.168.1.111
+WORKER_HOSTS=asus
+WORKER_IPS=asus=192.168.1.100
+LOCAL_CORES=4
+LOCAL_MEMORY=3072m
+WORKER_CORES=4
+WORKER_MEMORY=6144m
+```
+
+With one ASUS worker, `bin/submit` derives 8 total executor cores and requires both hosts by default. Recheck available RAM before increasing those values.
 
 ## Prepare the worker and run
 
