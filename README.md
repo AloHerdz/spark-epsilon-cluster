@@ -87,7 +87,7 @@ ssh worker1 'hostname; java -version; ip -brief -4 address'
 
 Repeat with aliases `worker2`, `worker3`, and so on when adding hosts. Use the address on the wired interface connected to the same LAN.
 
-For key creation, Debian SSH server setup, file permissions, and the passwordless `ssh hp` / `ssh asus` pattern, see [`docs/ssh-access.md`](docs/ssh-access.md). The addresses and login names in each teammate's `~/.ssh/config` stay local to that machine.
+For key creation, Debian SSH server setup, file permissions, and passwordless aliases such as `ssh worker1`, see [`docs/ssh-access.md`](docs/ssh-access.md). Each teammate keeps their own addresses and Linux usernames in their local `~/.ssh/config`.
 
 ### 2. Set the LAN configuration
 

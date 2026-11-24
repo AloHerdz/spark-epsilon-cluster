@@ -46,16 +46,16 @@ sudo ufw allow from <CONTROLLER_LAN_IP> to any port 22 proto tcp
 Create or edit `~/.ssh/config` on the controller. The text after `Host` is the short name used with `ssh`; replace each example address and username with that node's actual values.
 
 ```sshconfig
-Host hp
-    HostName <HP_LAN_IP>
-    User <HP_LINUX_USER>
+Host worker1
+    HostName <WORKER1_LAN_IP>
+    User <WORKER1_LINUX_USER>
     IdentityFile ~/.ssh/id_ed25519
     IdentitiesOnly yes
     ServerAliveInterval 30
 
-Host asus
-    HostName <ASUS_LAN_IP>
-    User <ASUS_LINUX_USER>
+Host worker2
+    HostName <WORKER2_LAN_IP>
+    User <WORKER2_LINUX_USER>
     IdentityFile ~/.ssh/id_ed25519
     IdentitiesOnly yes
     ServerAliveInterval 30
@@ -72,21 +72,21 @@ chmod 600 ~/.ssh/config
 Run once for each worker. `ssh-copy-id` asks for that worker account's password and appends the public key to its `~/.ssh/authorized_keys`:
 
 ```bash
-ssh-copy-id -i ~/.ssh/id_ed25519.pub hp
-ssh-copy-id -i ~/.ssh/id_ed25519.pub asus
+ssh-copy-id -i ~/.ssh/id_ed25519.pub worker1
+ssh-copy-id -i ~/.ssh/id_ed25519.pub worker2
 ```
 
 Afterward, these short commands should work without a password:
 
 ```bash
-ssh hp 'hostname; id -un; java -version'
-ssh asus 'hostname; id -un; java -version'
+ssh worker1 'hostname; id -un; java -version'
+ssh worker2 'hostname; id -un; java -version'
 ```
 
 To check which address and account an alias selects:
 
 ```bash
-ssh -G asus | grep -E '^(hostname|user|identityfile) '
+ssh -G worker1 | grep -E '^(hostname|user|identityfile) '
 ```
 
-The same SSH aliases are used by `WORKER_HOSTS` in `cluster.env`. For example, `WORKER_HOSTS=asus` tells the cluster scripts to connect using `ssh asus`.
+The same SSH aliases are used by `WORKER_HOSTS` in `cluster.env`. For example, `WORKER_HOSTS=worker1,worker2` tells the cluster scripts which aliases to use.
