@@ -73,6 +73,18 @@ bin/stop-cluster
 
 The default source is the LIBSVM BZip2 training file. If it is unavailable, the fetch script uses 20 SHA-256-verified Parquet shards pinned in `conf/epsilon-hf-train.tsv`; it can fall back to a checksum-verified TSV archive. The Scala job checks the 400,000 rows and 2,000 features and reports which hosts processed each partition. Keep at least 10 GiB free on each worker for the dataset and Spark runtime. `REQUIRED_HOSTS=2` by default means at least two distinct hosts must process partitions; set it explicitly to require more.
 
+## Classification model comparison
+
+After staging Epsilon and starting the workers, train and compare the distributed Logistic Regression and Linear SVC models:
+
+```bash
+bin/start-cluster
+bin/stage epsilon
+bin/submit classify 2>&1 | tee results/epsilon-classification.log
+```
+
+The default split is 80% train and 20% validation with seed 42. The output reports accuracy, precision, recall, F1, ROC AUC, and the confusion matrix. Each Spark executor is capped by `WORKER_CORES`, up to the cluster's available free core total. Model artifacts are saved locally under `results/models/epsilon/`. The validation split comes from the available training data; it is not an official held-out test set. See [`classification.md`](classification.md) for parameters and details.
+
 ## Monitoring
 
 - Master UI: `http://<MASTER_LAN_IP>:8080`

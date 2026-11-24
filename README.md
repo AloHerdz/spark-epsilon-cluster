@@ -2,7 +2,7 @@
 
 A reproducible, small-team cluster project for scanning the LIBSVM Epsilon training set across Linux hosts on a wired LAN. Spark schedules partitions across worker machines; a Scala application reports the records, labels, feature values, partitions, and hosts that processed them.
 
-This is a distributed data-processing demonstration. It does not train a predictive model. Source code and configuration are versioned; Spark binaries and the multi-gigabyte dataset are downloaded by the setup scripts and are intentionally kept out of Git.
+This project demonstrates distributed Epsilon processing and compares two binary classifiers with Spark MLlib. Source code and configuration are versioned; Spark binaries and the multi-gigabyte dataset are downloaded by the setup scripts and are intentionally kept out of Git.
 
 ## At a glance
 
@@ -142,6 +142,18 @@ bin/stop-cluster
 
 The script first tries the official LIBSVM `epsilon_normalized.bz2` training file. If it is unavailable, it downloads the 20 training Parquet shards from a pinned Hugging Face revision and verifies each file's SHA-256 from [`conf/epsilon-hf-train.tsv`](conf/epsilon-hf-train.tsv). Parquet reads directly in Spark. A ten-row spot comparison against CatBoost's LIBSVM-derived copy matched all 2,000 features in each row; negative labels are encoded as `0` instead of `-1`, so this appears to be a converted copy of the same split. If Hugging Face is unavailable, the script falls back to CatBoost's checksum-pinned TSV archive. `bin/stage epsilon` sends the selected dataset to each worker and uses a local `file:///` path on every machine. The Scala job reads LIBSVM, TSV, or Parquet, checks 400,000 rows and 2,000 features per row, and reports the hosts that processed partitions.
 
+### Train and compare classifiers
+
+Run two distributed binary classifiers on a seeded 80/20 split of the Epsilon training file:
+
+```bash
+bin/start-cluster
+bin/stage epsilon
+bin/submit classify 2>&1 | tee results/epsilon-classification.log
+```
+
+The Scala job trains Spark MLlib Logistic Regression and Linear SVC, then reports accuracy, precision, recall, F1, ROC AUC, and the confusion matrix. Labels are mapped from `-1/1` to `0/1`. The model coefficient artifacts are saved on the controller as JSON under `results/models/epsilon/`. `TRAIN_FRACTION`, `CLASSIFY_SEED`, and `CLASSIFY_MAX_ITER` can change the split and iteration count. This is a reproducible holdout from the available training split, not evaluation against a separate official test set. See [`docs/classification.md`](docs/classification.md).
+
 ## Monitoring and network
 
 | View | Default URL | Shows |
@@ -155,7 +167,7 @@ The script first tries the official LIBSVM `epsilon_normalized.bz2` training fil
 
 The scripts use Spark Standalone ports `7077` (master), `7078` (worker), `8080` (master UI), and `8081` (worker UI). The example job sets driver ports `37071` and `37072` and UI port `4040`. Allow those connections on the trusted lab LAN; Spark Standalone has no authentication enabled in this setup. Do not expose these ports to the public Internet.
 
-The cluster tolerates configured workers that are powered off or unreachable: `bin/start-cluster` skips them and starts reachable workers, while `bin/stage` skips their data copy. `bin/submit sample` and `bin/submit epsilon` require two live hosts by default and derive the executor core limit from Spark's current free capacity. Set `REQUIRED_HOSTS=4` to require all four hosts for an experiment, or `REQUIRED_HOSTS=1` for a single-host Epsilon run. Set `MIN_ACTIVE_WORKERS=1` in `cluster.env` to allow single-host startup; the default requires the controller and at least one worker.
+The cluster tolerates configured workers that are powered off or unreachable: `bin/start-cluster` skips them and starts reachable workers, while `bin/stage` skips their data copy. `bin/submit sample`, `bin/submit epsilon`, and `bin/submit classify` require two live hosts by default and derive their total executor core limit from Spark's current free capacity; `WORKER_CORES` sets a per-executor core cap. Set `REQUIRED_HOSTS=4` to require all four hosts for an experiment, or `REQUIRED_HOSTS=1` for a single-host Epsilon run. Set `MIN_ACTIVE_WORKERS=1` in `cluster.env` to allow single-host startup; the default requires the controller and at least one worker.
 
 If a worker disconnects after a job starts, Spark can retry its tasks on registered workers. The application still checks the host count at the end, so a run requiring more hosts than remained active is reported as failed rather than silently accepted. An ordinary unmanaged switch forwards unicast traffic only to destination ports. To capture traffic exchanged directly between other nodes, use a managed switch with port mirroring or capture on those nodes.
 
