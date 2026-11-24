@@ -24,8 +24,11 @@ object EpsilonAudit {
     throw new IllegalStateException("unreachable")
   }
 
+  private def executorAddress: String =
+    Option(System.getenv("SPARK_LOCAL_IP")).filter(_.nonEmpty).getOrElse(InetAddress.getLocalHost.getHostAddress)
+
   private def scanPartition(partition: Int, lines: Iterator[String], holdSeconds: Int, format: String): PartitionSummary = {
-    val host = InetAddress.getLocalHost.getHostName
+    val host = executorAddress
     var rows = 0L
     var positive = 0L
     var negative = 0L
@@ -134,7 +137,7 @@ object EpsilonAudit {
       holdSeconds: Int,
       inputIndex: Int,
       labelIndex: Int): PartitionSummary = {
-    val host = InetAddress.getLocalHost.getHostName
+    val host = executorAddress
     var rowCount = 0L
     var positive = 0L
     var negative = 0L
@@ -145,19 +148,32 @@ object EpsilonAudit {
     while (rows.hasNext) {
       val row = rows.next()
       try {
-        val label = row.getLong(labelIndex).toDouble
-        val values = row.getSeq[Seq[Double]](inputIndex)
+        val label = row.get(labelIndex) match {
+          case number: java.lang.Number => number.doubleValue()
+          case _ => Double.NaN
+        }
+        val values = row.get(inputIndex) match {
+          case sequence: scala.collection.Seq[_] => sequence
+          case _ => null
+        }
         val validLabel = label == 1.0 || label == 0.0 || label == -1.0
         var validValues = values != null && values.length == 2000
         var rowSquares = 0.0
         if (validValues) {
           val featureIterator = values.iterator
           while (featureIterator.hasNext && validValues) {
-            val feature = featureIterator.next()
-            if (feature == null || feature.length != 1 || !java.lang.Double.isFinite(feature.head)) {
+            val value = featureIterator.next() match {
+              case feature: scala.collection.Seq[_] if feature.length == 1 =>
+                feature.head match {
+                  case number: java.lang.Number => number.doubleValue()
+                  case _ => Double.NaN
+                }
+              case number: java.lang.Number => number.doubleValue()
+              case _ => Double.NaN
+            }
+            if (!java.lang.Double.isFinite(value)) {
               validValues = false
             } else {
-              val value = feature.head
               rowSquares += value * value
             }
           }
