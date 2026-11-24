@@ -12,7 +12,7 @@ bin/start-cluster
 
 Open `http://<MASTER_LAN_IP>:8090`. The page refreshes every five seconds and shows Spark worker registration, CPU, load, RAM, root-disk usage, Ethernet byte rates, and TCP sockets using Spark ports. For remote CPU, memory, disk, and socket data, the controller needs working SSH aliases from `WORKER_HOSTS`. A powered-off node remains visible with its Spark state and is omitted from live resource totals. The dashboard uses only Python's standard library and is bound to `MASTER_HOST` by default. `DASHBOARD_BIND` and `DASHBOARD_PORT` can override the bind address and port in the local environment.
 
-The dashboard is intended for a trusted lab LAN and does not add authentication. It reports socket endpoints and counters, not packet contents. Stop it with `bin/stop-cluster`.
+The dashboard is intended for a trusted lab LAN and does not add authentication. It reports socket endpoints and counters, not packet contents. Stop it with `bin/stop-cluster`. To change its bind address or port, set `DASHBOARD_BIND` or `DASHBOARD_PORT` in the controller's local `cluster.env`.
 
 After a sudden power-off, the kernel may retain a TCP socket for a while even after Spark has marked that worker `DEAD`. Use the Spark state column as the registration status and compare it with socket state and the worker UI.
 

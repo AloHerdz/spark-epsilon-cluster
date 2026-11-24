@@ -123,7 +123,7 @@ done
 count=$(alive_workers 2>/dev/null || echo 0)
 if [[ $ready != true && $count -lt $MIN_ACTIVE_WORKERS ]]; then
   echo "ERROR: only $count Spark worker(s) are ALIVE; MIN_ACTIVE_WORKERS=$MIN_ACTIVE_WORKERS." >&2
-  echo "Check SSH, addresses, and ports 7077/7078. Use MIN_ACTIVE_WORKERS=1 for a single-host fallback." >&2
+  echo "Check SSH, addresses, and ports 7077/7078. Set MIN_ACTIVE_WORKERS=1 in cluster.env for a single-host fallback." >&2
   exit 1
 fi
 
@@ -147,7 +147,10 @@ if [[ -s $DASHBOARD_PID_FILE ]]; then
   if [[ $dashboard_command == *"$ROOT/bin/dashboard"* ]]; then DASHBOARD_RUNNING=true; fi
 fi
 if [[ $DASHBOARD_RUNNING != true ]] && ! curl -fsS --max-time 1 "http://$MASTER_HOST:${DASHBOARD_PORT:-8090}/" >/dev/null 2>&1; then
-  nohup setsid "$ROOT/bin/dashboard" >>"$ROOT/logs/dashboard.log" 2>&1 </dev/null &
+  nohup setsid env MASTER_HOST="$MASTER_HOST" DASHBOARD_BIND="${DASHBOARD_BIND:-$MASTER_HOST}" \
+    DASHBOARD_PORT="${DASHBOARD_PORT:-8090}" SSH_CONFIG="$SSH_CONFIG" \
+    SSH_CONNECT_TIMEOUT="$SSH_CONNECT_TIMEOUT" "$ROOT/bin/dashboard" \
+    >>"$ROOT/logs/dashboard.log" 2>&1 </dev/null &
   echo $! >"$DASHBOARD_PID_FILE"
   DASHBOARD_READY=false
   for _ in $(seq 1 8); do
