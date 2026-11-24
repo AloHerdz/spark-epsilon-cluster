@@ -25,7 +25,18 @@ fi
 export JAVA_HOME
 export SPARK_LOCAL_IP=${NODE_HOST:-${MASTER_HOST:-127.0.0.1}}
 
-running() { [[ -s "$ROOT/logs/$1.pid" ]] && kill -0 "$(cat "$ROOT/logs/$1.pid")" 2>/dev/null; }
+running() {
+  local name=$1 pid command_line
+  [[ -s "$ROOT/logs/$name.pid" ]] || return 1
+  pid=$(cat "$ROOT/logs/$name.pid")
+  kill -0 "$pid" 2>/dev/null || return 1
+  command_line=$(ps -p "$pid" -o args= 2>/dev/null || true)
+  case $name in
+    master) [[ $command_line == *org.apache.spark.deploy.master.Master* ]] ;;
+    worker) [[ $command_line == *org.apache.spark.deploy.worker.Worker* ]] ;;
+    *) return 1 ;;
+  esac
+}
 start() {
   local name=$1; shift
   if running "$name"; then echo "$name already running PID=$(cat "$ROOT/logs/$name.pid")"; return; fi

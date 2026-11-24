@@ -2,6 +2,8 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 source "$ROOT/bin/config.sh"
+SSH_CONFIG=${SSH_CONFIG:-$HOME/.ssh/config}
+SSH_CONNECT_TIMEOUT=${SSH_CONNECT_TIMEOUT:-4}
 MODE=${1:-sample}
 case $MODE in
   sample) FILE=sample.libsvm ;;
@@ -24,12 +26,27 @@ mapfile -t WORKER_LIST < <(worker_aliases)
 ((${#WORKER_LIST[@]} > 0)) || { echo "Set at least one SSH alias in WORKER_HOSTS." >&2; exit 1; }
 mkdir -p /tmp/epsilon-cluster-data
 ln -sfn "$ROOT/data/$FILE" "/tmp/epsilon-cluster-data/$FILE"
+STAGED=0
+SKIPPED=0
 for target in "${WORKER_LIST[@]}"; do
-  ssh -F "${SSH_CONFIG:-$HOME/.ssh/config}" "$target" \
-    'mkdir -p "$HOME/cluster-epsilon/data" /tmp/epsilon-cluster-data'
-  rsync -a --partial -e "ssh -F ${SSH_CONFIG:-$HOME/.ssh/config}" \
-    "$ROOT/data/$FILE" "$target:cluster-epsilon/data/"
-  ssh -F "${SSH_CONFIG:-$HOME/.ssh/config}" "$target" \
-    "ln -sfn \"\$HOME/cluster-epsilon/data/$FILE\" /tmp/epsilon-cluster-data/$FILE && ls -lh /tmp/epsilon-cluster-data/$FILE"
+  if ! ssh -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout="$SSH_CONNECT_TIMEOUT" "$target" \
+      'mkdir -p "$HOME/cluster-epsilon/data" /tmp/epsilon-cluster-data'; then
+    echo "Skipping $target: SSH unavailable; it can be staged when it rejoins." >&2
+    SKIPPED=$((SKIPPED + 1))
+    continue
+  fi
+  if ! rsync -a --partial -e "ssh -F $SSH_CONFIG -o BatchMode=yes -o ConnectTimeout=$SSH_CONNECT_TIMEOUT" \
+      "$ROOT/data/$FILE" "$target:cluster-epsilon/data/"; then
+    echo "Skipping $target: dataset transfer failed; rsync can resume when it rejoins." >&2
+    SKIPPED=$((SKIPPED + 1))
+    continue
+  fi
+  if ! ssh -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout="$SSH_CONNECT_TIMEOUT" "$target" \
+      "ln -sfn \"\$HOME/cluster-epsilon/data/$FILE\" /tmp/epsilon-cluster-data/$FILE && ls -lh /tmp/epsilon-cluster-data/$FILE"; then
+    echo "Skipping $target: could not create the dataset link." >&2
+    SKIPPED=$((SKIPPED + 1))
+    continue
+  fi
+  STAGED=$((STAGED + 1))
 done
-echo "Staged $FILE on controller and ${#WORKER_LIST[@]} worker(s)."
+echo "Staged $FILE on controller and $STAGED reachable worker(s); skipped $SKIPPED."

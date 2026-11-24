@@ -52,7 +52,7 @@ bin/observe
 bin/submit sample | tee results/sample-run.log
 ```
 
-The `HOST` summaries in the output should include the controller and at least one worker. Stop the cluster before changing its configuration or restarting the run:
+The `HOST` summaries in the output should include the controller and at least one worker. `bin/start-cluster` skips SSH aliases whose hosts are powered off or unreachable; its default minimum is the controller plus one worker. `bin/stage` also skips offline workers, which can be staged later with `bin/stage epsilon` after they rejoin. Stop the cluster before changing its configuration or restarting the run:
 
 ```bash
 bin/stop-cluster
@@ -71,13 +71,14 @@ bin/submit epsilon | tee results/epsilon-run.log
 bin/stop-cluster
 ```
 
-The default source is the LIBSVM BZip2 training file. If it is unavailable, the fetch script uses 20 SHA-256-verified Parquet shards pinned in `conf/epsilon-hf-train.tsv`; it can fall back to a checksum-verified TSV archive. The Scala job checks the 400,000 rows and 2,000 features and reports which hosts processed each partition. Keep at least 10 GiB free on each worker for the dataset and Spark runtime.
+The default source is the LIBSVM BZip2 training file. If it is unavailable, the fetch script uses 20 SHA-256-verified Parquet shards pinned in `conf/epsilon-hf-train.tsv`; it can fall back to a checksum-verified TSV archive. The Scala job checks the 400,000 rows and 2,000 features and reports which hosts processed each partition. Keep at least 10 GiB free on each worker for the dataset and Spark runtime. `REQUIRED_HOSTS=2` by default means at least two distinct hosts must process partitions; set it explicitly to require more.
 
 ## Monitoring
 
 - Master UI: `http://<MASTER_LAN_IP>:8080`
 - Spark application UI while a job is active: `http://<MASTER_LAN_IP>:4040`
 - Worker UI: `http://<WORKER_LAN_IP>:8081`
-- Wireshark display filter: `tcp.port == 7077 || tcp.port == 7078 || tcp.port == 37071 || tcp.port == 37072`
+- Visual system and connection panel: `http://<MASTER_LAN_IP>:8090` (automatically started by `bin/start-cluster`)
+- Wireshark setup and display filters: [`network-observability.md`](network-observability.md)
 
 A regular switch forwards unicast packets only to their destination ports. To capture traffic between two other nodes, use switch port mirroring or capture on one of those nodes.

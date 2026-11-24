@@ -2,10 +2,18 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 source "$ROOT/bin/config.sh"
+SSH_CONFIG=${SSH_CONFIG:-$HOME/.ssh/config}
+SSH_CONNECT_TIMEOUT=${SSH_CONNECT_TIMEOUT:-4}
 mapfile -t WORKER_LIST < <(worker_aliases)
 for target in "${WORKER_LIST[@]}"; do
-  ssh -F "${SSH_CONFIG:-$HOME/.ssh/config}" "$target" \
+  ssh -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout="$SSH_CONNECT_TIMEOUT" "$target" \
     'cd cluster-epsilon && bin/node stop-worker' || true
 done
+if [[ -s "$ROOT/logs/dashboard.pid" ]]; then
+  dashboard_pid=$(cat "$ROOT/logs/dashboard.pid")
+  dashboard_command=$(ps -p "$dashboard_pid" -o args= 2>/dev/null || true)
+  if [[ $dashboard_command == *"$ROOT/bin/dashboard"* ]]; then kill "$dashboard_pid" 2>/dev/null || true; fi
+  rm -f "$ROOT/logs/dashboard.pid"
+fi
 "$ROOT/bin/node" stop-worker
 "$ROOT/bin/node" stop-master

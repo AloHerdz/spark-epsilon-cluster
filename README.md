@@ -149,16 +149,15 @@ The script first tries the official LIBSVM `epsilon_normalized.bz2` training fil
 | Spark master | `http://MASTER_HOST:8080` | Registered workers and cluster capacity |
 | Spark application | `http://MASTER_HOST:4040` | Jobs, stages, task count, and executor activity while the job is running |
 | Worker 1 | `http://WORKER1_IP:8081` | Worker status and allocated resources |
+| Cluster dashboard | `http://MASTER_HOST:8090` | Spark state, CPU/RAM/disk, network rates, and TCP sockets |
+
+`bin/start-cluster` starts the dependency-free dashboard on the controller. It refreshes every five seconds and gathers remote host metrics over the configured SSH aliases. Use `bin/stop-cluster` to stop Spark and the dashboard. The dashboard reports connection endpoints and counters; it does not capture packet contents. See [`docs/network-observability.md`](docs/network-observability.md) for Wireshark setup, filters, and switch mirroring limits.
 
 The scripts use Spark Standalone ports `7077` (master), `7078` (worker), `8080` (master UI), and `8081` (worker UI). The example job sets driver ports `37071` and `37072` and UI port `4040`. Allow those connections on the trusted lab LAN; Spark Standalone has no authentication enabled in this setup. Do not expose these ports to the public Internet.
 
-Wireshark can capture traffic visible on the controller's interface. Example display filter:
+The cluster tolerates configured workers that are powered off or unreachable: `bin/start-cluster` skips them and starts reachable workers, while `bin/stage` skips their data copy. `bin/submit sample` and `bin/submit epsilon` require two live hosts by default and derive the executor core limit from Spark's current free capacity. Set `REQUIRED_HOSTS=4` to require all four hosts for an experiment, or `REQUIRED_HOSTS=1` for a single-host Epsilon run. `MIN_ACTIVE_WORKERS=1 bin/start-cluster` enables single-host startup; the default requires the controller and at least one worker.
 
-```text
-tcp.port == 7077 || tcp.port == 7078 || tcp.port == 37071 || tcp.port == 37072
-```
-
-An ordinary unmanaged switch forwards unicast traffic only to the ports that need it. To capture traffic exchanged directly between other nodes, use a managed switch with port mirroring or capture on those nodes. The Spark UIs and the `PART` lines in the job output show task distribution without packet capture.
+If a worker disconnects after a job starts, Spark can retry its tasks on registered workers. The application still checks the host count at the end, so a run requiring more hosts than remained active is reported as failed rather than silently accepted. An ordinary unmanaged switch forwards unicast traffic only to destination ports. To capture traffic exchanged directly between other nodes, use a managed switch with port mirroring or capture on those nodes.
 
 ## Project layout
 
@@ -181,7 +180,7 @@ The reproducible lab sequence is in [`docs/lab-runbook.md`](docs/lab-runbook.md)
 - The Spark version and checksum verification are fixed in the source scripts.
 - System package versions can differ by distribution mirror and date; record `java -version`, `uname -a`, and each node's IP alongside experiment output.
 - Keep the generated `cluster.env`, dataset, Spark binaries, SSH keys, and private logs out of Git. `.gitignore` already excludes the local configuration and downloaded artifacts.
-- The smoke run uses 512 deterministic rows and requires at least two hosts. Epsilon uses the original 400,000-row training set.
+- The smoke run uses 512 deterministic rows and requires at least two hosts by default. Epsilon uses the original 400,000-row training set and also requires two active hosts by default; override `REQUIRED_HOSTS` when an experiment needs a stricter host count.
 - The CatBoost fallback is a checksum-pinned conversion of the LIBSVM Epsilon training split. The Hugging Face Parquet mirror is pinned by commit and per-file SHA-256; the first 10 rows were compared against the CatBoost conversion, with identical feature values and the negative-label mapping from `-1` to `0`.
 - To use another number of workers, add SSH aliases and update `WORKER_HOSTS` / `WORKER_IPS`; no script contains a machine-specific hostname.
 

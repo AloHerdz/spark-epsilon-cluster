@@ -37,15 +37,71 @@ INPUT=${INPUT_OVERRIDE:-$INPUT}
 [[ -f "$ROOT/build/epsilon-benchmark.jar" ]] || "$ROOT/bin/build"
 mapfile -t WORKER_LIST < <(worker_aliases)
 EXPECTED_HOSTS=$((${#WORKER_LIST[@]} + 1))
-if [[ -z ${REQUIRED_HOSTS:-} ]]; then
-  if [[ $MODE == sample ]]; then
-    REQUIRED_HOSTS=2
-  else
-    REQUIRED_HOSTS=$EXPECTED_HOSTS
-  fi
-fi
+REQUIRED_HOSTS=${REQUIRED_HOSTS:-2}
+[[ $REQUIRED_HOSTS =~ ^[1-9][0-9]*$ ]] || { echo "REQUIRED_HOSTS must be a positive integer." >&2; exit 2; }
 WORKER_CORES=${WORKER_CORES:-2}
-CLUSTER_CORES=${CLUSTER_CORES:-$((${LOCAL_CORES:-2} + ${#WORKER_LIST[@]} * WORKER_CORES))}
+[[ $WORKER_CORES =~ ^[1-9][0-9]*$ ]] || { echo "WORKER_CORES must be a positive integer." >&2; exit 2; }
+
+declare -A CONFIGURED_IPS=()
+CONFIGURED_IPS["$MASTER_HOST"]=controller
+for target in "${WORKER_LIST[@]}"; do
+  NODE_IP=$(worker_ip_for "$target") || { echo "Missing $target in WORKER_IPS." >&2; exit 1; }
+  CONFIGURED_IPS["$NODE_IP"]=$target
+done
+
+# Base resource limits on workers currently ALIVE in Spark, rather than on the
+# configured inventory. A powered-off node is expected in this lab and should
+# not make Spark wait for cores that do not exist.
+if ! MASTER_JSON=$(curl -fsS --max-time 4 "http://$MASTER_HOST:8080/json/"); then
+  echo "Spark master is not responding at http://$MASTER_HOST:8080." >&2
+  echo "Start it with bin/start-cluster and check the controller address." >&2
+  exit 1
+fi
+CLUSTER_INFO=$(python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+alive={}
+for w in d.get("workers", []):
+    if w.get("state") == "ALIVE":
+        host=w.get("host")
+        if not host: continue
+        cores=int(w.get("cores", 0) or 0)
+        used=int(w.get("coresused", 0) or 0)
+        free=int(w.get("coresfree", max(0, cores-used)) or 0)
+        alive[host]=max(alive.get(host, 0), free)
+for host,free in sorted(alive.items()): print(f"{host}\t{free}")
+' <<<"$MASTER_JSON")
+ALIVE_HOSTS=0
+AVAILABLE_CORES=0
+while IFS=$'\t' read -r NODE_IP NODE_CORES; do
+  [[ -n $NODE_IP ]] || continue
+  [[ $NODE_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+  [[ -n ${CONFIGURED_IPS[$NODE_IP]+known} ]] || continue
+  if curl -fsS --max-time 1 -o /dev/null "http://$NODE_IP:8081/"; then
+    ALIVE_HOSTS=$((ALIVE_HOSTS + 1))
+    AVAILABLE_CORES=$((AVAILABLE_CORES + NODE_CORES))
+  else
+    echo "Spark lists $NODE_IP as ALIVE, but its worker UI is unreachable; excluding it from preflight resources." >&2
+  fi
+done <<<"$CLUSTER_INFO"
+if (( ALIVE_HOSTS < REQUIRED_HOSTS )); then
+  echo "Only $ALIVE_HOSTS configured Spark host(s) passed the live check; this run requires $REQUIRED_HOSTS." >&2
+  echo "Power on/reconnect a worker, lower REQUIRED_HOSTS, or start with MIN_ACTIVE_WORKERS=1 for a local-only run." >&2
+  exit 1
+fi
+if [[ -z ${CLUSTER_CORES:-} ]]; then
+  CLUSTER_CORES=$AVAILABLE_CORES
+fi
+[[ $CLUSTER_CORES =~ ^[1-9][0-9]*$ ]] || {
+  echo "No available Spark cores were reported (free=$AVAILABLE_CORES). Check the Spark master UI." >&2
+  exit 1
+}
+if (( CLUSTER_CORES < WORKER_CORES )); then
+  echo "Available cores ($CLUSTER_CORES) are below WORKER_CORES ($WORKER_CORES)." >&2
+  echo "Lower WORKER_CORES or wait until workers have free capacity." >&2
+  exit 1
+fi
+echo "Submitting $MODE with $ALIVE_HOSTS ALIVE host(s), $CLUSTER_CORES free core(s), requiring $REQUIRED_HOSTS host(s)."
 export CLUSTER_CORES REQUIRED_HOSTS
 export SPARK_HOME=/tmp/epsilon-spark
 export SPARK_LOCAL_IP=$MASTER_HOST
@@ -54,6 +110,7 @@ exec "$SPARK_HOME/bin/spark-class" org.apache.spark.deploy.SparkSubmit \
   --class EpsilonAudit --driver-memory 1536m --executor-memory 768m \
   --executor-cores "$WORKER_CORES" --total-executor-cores "$CLUSTER_CORES" \
   --conf spark.scheduler.minRegisteredResourcesRatio=1.0 \
+  --conf spark.scheduler.maxRegisteredResourcesWaitingTime=15s \
   --conf "spark.driver.host=$MASTER_HOST" \
   --conf spark.driver.bindAddress=0.0.0.0 \
   --conf spark.driver.port=37071 \

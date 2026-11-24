@@ -3,44 +3,169 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 source "$ROOT/bin/config.sh"
 : "${MASTER_HOST:?Set MASTER_HOST to the controller wired LAN address}"
+SSH_CONFIG=${SSH_CONFIG:-$HOME/.ssh/config}
+SSH_CONNECT_TIMEOUT=${SSH_CONNECT_TIMEOUT:-4}
+MIN_ACTIVE_WORKERS=${MIN_ACTIVE_WORKERS:-2}
+CLUSTER_START_TIMEOUT=${CLUSTER_START_TIMEOUT:-60}
+
+[[ $MIN_ACTIVE_WORKERS =~ ^[1-9][0-9]*$ ]] || { echo "MIN_ACTIVE_WORKERS must be a positive integer." >&2; exit 2; }
+[[ $CLUSTER_START_TIMEOUT =~ ^[1-9][0-9]*$ ]] || { echo "CLUSTER_START_TIMEOUT must be a positive integer." >&2; exit 2; }
+
 mapfile -t WORKER_LIST < <(worker_aliases)
 ((${#WORKER_LIST[@]} > 0)) || { echo "Set at least one SSH alias in WORKER_HOSTS." >&2; exit 1; }
+
+declare -a REACHABLE_WORKERS=()
+declare -a UNAVAILABLE_WORKERS=()
+declare -a REGISTER_TARGETS=()
+declare -A WORKER_IP=()
 
 for target in "${WORKER_LIST[@]}"; do
   NODE_IP=$(worker_ip_for "$target") || { echo "Missing $target in WORKER_IPS." >&2; exit 1; }
   [[ $NODE_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
     echo "Invalid LAN address for $target: $NODE_IP" >&2; exit 1;
   }
-  "$ROOT/bin/sync-node" "$target"
+  WORKER_IP["$target"]=$NODE_IP
+
+  if ! ssh -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout="$SSH_CONNECT_TIMEOUT" \
+      "$target" true >/dev/null 2>&1; then
+    echo "Worker $target ($NODE_IP) is unreachable; skipping it for this start." >&2
+    UNAVAILABLE_WORKERS+=("$target")
+    continue
+  fi
+
+  if ! "$ROOT/bin/sync-node" "$target"; then
+    echo "Worker $target ($NODE_IP) could not be synchronized; skipping it for this start." >&2
+    UNAVAILABLE_WORKERS+=("$target")
+    continue
+  fi
+  REACHABLE_WORKERS+=("$target")
 done
 
 MASTER_HOST=$MASTER_HOST "$ROOT/bin/node" start-master
+
+MASTER_READY=false
+for _ in $(seq 1 20); do
+  if curl -fsS --max-time 2 "http://$MASTER_HOST:8080/json/" >/dev/null 2>&1; then
+    MASTER_READY=true
+    break
+  fi
+  sleep 1
+done
+if [[ $MASTER_READY != true ]]; then
+  echo "ERROR: Spark master is not responding at http://$MASTER_HOST:8080." >&2
+  exit 1
+fi
+
+worker_state() {
+  local node_ip=$1
+  curl -fsS --max-time 2 "http://$MASTER_HOST:8080/json/" 2>/dev/null | \
+    python3 -c 'import json,sys; ip=sys.argv[1]; data=json.load(sys.stdin); matches=[w for w in data.get("workers",[]) if w.get("host")==ip]; print(matches[-1].get("state", "MISSING") if matches else "MISSING")' "$node_ip" 2>/dev/null || true
+}
+
+alive_workers() {
+  curl -fsS --max-time 2 "http://$MASTER_HOST:8080/json/" | \
+    python3 -c 'import json,sys; data=json.load(sys.stdin); print(len({w.get("host") for w in data.get("workers", []) if w.get("state")=="ALIVE" and w.get("host")}))'
+}
+
 MASTER_HOST=$MASTER_HOST NODE_HOST=$MASTER_HOST \
   WORKER_CORES=${LOCAL_CORES:-2} WORKER_MEMORY=${LOCAL_MEMORY:-2048m} \
   "$ROOT/bin/node" start-worker
 
-for target in "${WORKER_LIST[@]}"; do
-  NODE_IP=$(worker_ip_for "$target")
-  ssh -F "${SSH_CONFIG:-$HOME/.ssh/config}" "$target" \
-    "cd cluster-epsilon && MASTER_HOST=$MASTER_HOST NODE_HOST=$NODE_IP WORKER_CORES=${WORKER_CORES:-2} WORKER_MEMORY=${WORKER_MEMORY:-2048m} bin/node start-worker"
+# A stale worker process can still have a live PID while Spark marks it DEAD.
+# Restart only that worker; healthy workers keep their executors and current work.
+local_state=MISSING
+for _ in $(seq 1 10); do
+  local_state=$(worker_state "$MASTER_HOST")
+  [[ $local_state == ALIVE ]] && break
+  sleep 1
+done
+if [[ $local_state != ALIVE ]]; then
+  echo "Restarting local Spark worker: state=$local_state" >&2
+  "$ROOT/bin/node" stop-worker || true
+  MASTER_HOST=$MASTER_HOST NODE_HOST=$MASTER_HOST \
+    WORKER_CORES=${LOCAL_CORES:-2} WORKER_MEMORY=${LOCAL_MEMORY:-2048m} \
+    "$ROOT/bin/node" start-worker
+fi
+
+for target in "${REACHABLE_WORKERS[@]}"; do
+  NODE_IP=${WORKER_IP[$target]}
+  state=$(worker_state "$NODE_IP")
+  if [[ $state == ALIVE ]]; then
+    echo "Worker $target ($NODE_IP) already registered."
+    REGISTER_TARGETS+=("$target")
+    continue
+  fi
+
+  remote_command="cd cluster-epsilon && { bin/node stop-worker >/dev/null 2>&1 || true; MASTER_HOST=$MASTER_HOST NODE_HOST=$NODE_IP WORKER_CORES=${WORKER_CORES:-2} WORKER_MEMORY=${WORKER_MEMORY:-2048m} bin/node start-worker; }"
+  if ! ssh -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout="$SSH_CONNECT_TIMEOUT" \
+      "$target" "$remote_command"; then
+    echo "Worker $target ($NODE_IP) failed to start; continuing with other workers." >&2
+    UNAVAILABLE_WORKERS+=("$target")
+  else
+    REGISTER_TARGETS+=("$target")
+  fi
 done
 
-EXPECTED=$((${#WORKER_LIST[@]} + 1))
+EXPECTED_WORKERS=$((${#WORKER_LIST[@]} + 1))
+TARGET_WORKERS=$((${#REGISTER_TARGETS[@]} + 1))
 ready=false
-for _ in $(seq 1 45); do
-  if curl -fsS --max-time 2 "http://$MASTER_HOST:8080/json/" | \
-    python3 -c 'import json,sys; d=json.load(sys.stdin); n=sum(w.get("state")=="ALIVE" for w in d.get("workers", [])); sys.exit(0 if n>=int(sys.argv[1]) else 1)' "$EXPECTED" 2>/dev/null; then
+elapsed=0
+while ((elapsed < CLUSTER_START_TIMEOUT)); do
+  count=$(alive_workers 2>/dev/null || echo 0)
+  if ((count >= TARGET_WORKERS)); then
     ready=true
     break
   fi
   sleep 2
+  elapsed=$((elapsed + 2))
 done
-if [[ $ready != true ]]; then
-  echo "ERROR: Spark master did not report $EXPECTED ALIVE workers within 90 seconds." >&2
+
+count=$(alive_workers 2>/dev/null || echo 0)
+if [[ $ready != true && $count -lt $MIN_ACTIVE_WORKERS ]]; then
+  echo "ERROR: only $count Spark worker(s) are ALIVE; MIN_ACTIVE_WORKERS=$MIN_ACTIVE_WORKERS." >&2
+  echo "Check SSH, addresses, and ports 7077/7078. Use MIN_ACTIVE_WORKERS=1 for a single-host fallback." >&2
   exit 1
 fi
-echo "Cluster ready: $EXPECTED worker(s) registered."
+
+if [[ $ready == true ]]; then
+  echo "Cluster ready: $count/$EXPECTED_WORKERS configured Spark hosts are ALIVE (including the controller)."
+else
+  echo "Cluster running in degraded mode: $count/$EXPECTED_WORKERS Spark hosts are ALIVE; minimum is $MIN_ACTIVE_WORKERS." >&2
+fi
+for target in "${UNAVAILABLE_WORKERS[@]}"; do
+  printf '  offline/skipped: %s (%s)\n' "$target" "${WORKER_IP[$target]}"
+done
+
+# Start the optional local observability UI without making Spark startup depend
+# on the dashboard. It binds to MASTER_HOST by default, the controller's LAN IP.
+mkdir -p "$ROOT/logs"
+DASHBOARD_PID_FILE="$ROOT/logs/dashboard.pid"
+DASHBOARD_RUNNING=false
+if [[ -s $DASHBOARD_PID_FILE ]]; then
+  dashboard_pid=$(cat "$DASHBOARD_PID_FILE")
+  dashboard_command=$(ps -p "$dashboard_pid" -o args= 2>/dev/null || true)
+  if [[ $dashboard_command == *"$ROOT/bin/dashboard"* ]]; then DASHBOARD_RUNNING=true; fi
+fi
+if [[ $DASHBOARD_RUNNING != true ]] && ! curl -fsS --max-time 1 "http://$MASTER_HOST:${DASHBOARD_PORT:-8090}/" >/dev/null 2>&1; then
+  nohup setsid "$ROOT/bin/dashboard" >>"$ROOT/logs/dashboard.log" 2>&1 </dev/null &
+  echo $! >"$DASHBOARD_PID_FILE"
+  DASHBOARD_READY=false
+  for _ in $(seq 1 8); do
+    if curl -fsS --max-time 1 "http://$MASTER_HOST:${DASHBOARD_PORT:-8090}/" >/dev/null 2>&1; then
+      DASHBOARD_READY=true
+      break
+    fi
+    sleep 1
+  done
+  [[ $DASHBOARD_READY == true ]] || echo "Dashboard did not start; see $ROOT/logs/dashboard.log." >&2
+fi
 echo "Master UI: http://$MASTER_HOST:8080"
+echo "Observability dashboard: http://$MASTER_HOST:${DASHBOARD_PORT:-8090}"
 for target in "${WORKER_LIST[@]}"; do
-  printf '%s worker UI: http://%s:8081\n' "$target" "$(worker_ip_for "$target")"
+  NODE_IP=${WORKER_IP[$target]}
+  if [[ $(worker_state "$NODE_IP") == ALIVE ]]; then
+    printf '%s worker UI: http://%s:8081\n' "$target" "$NODE_IP"
+  else
+    printf '%s worker offline: %s\n' "$target" "$NODE_IP"
+  fi
 done
