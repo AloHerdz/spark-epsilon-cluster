@@ -12,6 +12,10 @@ for w in d.get("workers", []):
 for a in d.get("activeapps", []):
     print("Application:", a.get("id"), a.get("name"))
 '
-echo "TCP connections to master or HP:"
-ss -tn | awk -v master="$MASTER_HOST" -v hp="${HP_NODE_HOST:-}" \
-  'NR==1 || (hp != "" && index($0,master) && index($0,hp)) || (hp == "" && index($0,master))'
+echo "Configured workers:"
+while IFS= read -r target; do
+  [[ -n $target ]] || continue
+  printf '  %s %s\n' "$target" "$(worker_ip_for "$target" || echo 'IP not set')"
+done < <(worker_aliases)
+echo "TCP connections involving Spark ports:"
+ss -tn | awk 'NR == 1 || /:7077|:7078|:37071|:37072/'

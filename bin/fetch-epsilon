@@ -1,14 +1,199 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-DEST="$ROOT/data/epsilon_normalized.bz2"
-URL=https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/binary/epsilon_normalized.bz2
-mkdir -p "$ROOT/data"
-if [[ -f "$DEST" ]] && bzip2 -t "$DEST"; then
-  echo "Already downloaded and valid: $DEST"
-  exit 0
+DATA="$ROOT/data"
+LIBSVM_FILE="$DATA/epsilon_normalized.bz2"
+LIBSVM_URL=https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/binary/epsilon_normalized.bz2
+CATBOOST_URL=https://storage.mds.yandex.net/get-devtools-opensource/250854/epsilon.tar.gz
+CATBOOST_ARCHIVE="$DATA/epsilon-catboost.tar.gz"
+CATBOOST_MD5=5bbfac403ac673da7d7ee84bd532e973
+CATBOOST_BYTES=${EPSILON_ARCHIVE_BYTES:-3862612309}
+SOURCE=${EPSILON_SOURCE:-auto}
+mkdir -p "$DATA"
+
+validate_libsvm() {
+  bzip2 -t "$LIBSVM_FILE"
+  sha256sum "$LIBSVM_FILE" | awk '{print $1 "  epsilon_normalized.bz2"}' > "$DATA/epsilon_normalized.bz2.sha256"
+  printf 'libsvm\n' > "$DATA/epsilon.format"
+  echo "Validated LIBSVM Epsilon training file: $LIBSVM_FILE"
+  ls -lh "$LIBSVM_FILE"
+}
+
+validate_tsv() {
+  local count columns
+  count=$(awk 'END { print NR }' "$DATA/epsilon_train.tsv")
+  columns=$(awk -F '\t' 'NR == 1 { print NF; exit }' "$DATA/epsilon_train.tsv")
+  [[ $count == 400000 && $columns == 2001 ]] || {
+    echo "Invalid TSV Epsilon data: rows=$count columns_on_first_row=$columns (expected 400000 x 2001)." >&2
+    return 1
+  }
+  sha256sum "$DATA/epsilon_train.tsv" | awk '{print $1 "  epsilon_train.tsv"}' > "$DATA/epsilon_train.tsv.sha256"
+  printf 'tsv\n' > "$DATA/epsilon.format"
+  echo "Validated CatBoost/LIBSVM TSV training split: $DATA/epsilon_train.tsv"
+  ls -lh "$DATA/epsilon_train.tsv"
+}
+
+download_catboost_archive() {
+  local part_dir="$DATA/.epsilon-catboost-parts"
+  local chunk_bytes=$((8 * 1024 * 1024))
+  local jobs=${EPSILON_DOWNLOAD_JOBS:-16}
+  local part_count=$(((CATBOOST_BYTES + chunk_bytes - 1) / chunk_bytes))
+  local probe="$part_dir/range-probe.tmp"
+  local probe_status probe_size
+  mkdir -p "$part_dir"
+
+  if [[ -f "$CATBOOST_ARCHIVE" ]] && [[ $(md5sum "$CATBOOST_ARCHIVE" | awk '{print $1}') == "$CATBOOST_MD5" ]]; then
+    echo "Reusing verified CatBoost dataset archive."
+  else
+    # Verify byte-range support before launching parallel requests. A 200 response
+    # would ignore Range, so reject it before any large accidental full downloads.
+    probe_status=$(curl --fail --location --silent --show-error --range 0-65535 \
+      --output "$probe" --write-out '%{http_code}' "$CATBOOST_URL") || probe_status=${probe_status:-000}
+    probe_size=$(stat -c '%s' "$probe" 2>/dev/null || echo 0)
+    rm -f "$probe"
+    [[ $probe_status == 206 && $probe_size == 65536 ]] || {
+      echo "The CatBoost mirror did not return a valid 64 KiB HTTP range (status=$probe_status bytes=$probe_size)." >&2
+      echo "The download will use a resumable single-stream request instead." >&2
+      curl --fail --location --retry 5 --retry-delay 10 --continue-at - \
+        --output "$CATBOOST_ARCHIVE" "$CATBOOST_URL"
+    }
+
+    if [[ ! -f "$CATBOOST_ARCHIVE" || $(md5sum "$CATBOOST_ARCHIVE" | awk '{print $1}') != "$CATBOOST_MD5" ]]; then
+      local i start end expected part tmp offset remaining status rc got
+      local -a pids=()
+      download_part() {
+        local n=$1 p s e need tmpfile code curl_rc bytes attempts=0
+        p="$part_dir/part-$(printf '%03d' "$n").bin"
+        s=$((n * chunk_bytes))
+        e=$((s + chunk_bytes - 1))
+        (( e >= CATBOOST_BYTES )) && e=$((CATBOOST_BYTES - 1))
+        need=$((e - s + 1))
+        tmpfile="$p.tmp"
+        bytes=$(stat -c '%s' "$p" 2>/dev/null || echo 0)
+        (( bytes <= need )) || { rm -f "$p"; bytes=0; }
+        while (( bytes < need )); do
+          offset=$((s + bytes))
+          remaining=$((need - bytes))
+          rm -f "$tmpfile"
+          set +e
+          code=$(curl --location --silent --show-error --connect-timeout 30 \
+            --speed-time 90 --speed-limit 1024 --range "$offset-$e" \
+            --max-filesize "$remaining" --output "$tmpfile" \
+            --write-out '%{http_code}' "$CATBOOST_URL")
+          curl_rc=$?
+          set -e
+          got=$(stat -c '%s' "$tmpfile" 2>/dev/null || echo 0)
+          if [[ $code != 206 ]]; then
+            rm -f "$tmpfile"
+            if [[ $code == 200 ]]; then
+              echo "Chunk $n returned HTTP 200; the mirror ignored byte ranges." >&2
+              return 1
+            fi
+            attempts=$((attempts + 1))
+            sleep 3
+            if (( attempts >= 5 )); then
+              echo "Chunk $n returned HTTP ${code:-000} after repeated retries." >&2
+              return 1
+            fi
+            continue
+          fi
+          if (( got > 0 && got <= remaining )); then
+            cat "$tmpfile" >> "$p"
+            bytes=$((bytes + got))
+            attempts=0
+          else
+            attempts=$((attempts + 1))
+          fi
+          rm -f "$tmpfile"
+          if (( curl_rc != 0 && got == 0 )); then attempts=$((attempts + 1)); fi
+          if (( attempts >= 5 )); then
+            echo "Chunk $n stopped at $bytes/$need bytes after repeated network errors." >&2
+            return 1
+          fi
+        done
+        echo "Downloaded archive chunk $((n + 1))/$part_count ($need bytes)."
+      }
+
+      for ((i = 0; i < part_count; i++)); do
+        part="$part_dir/part-$(printf '%03d' "$i").bin"
+        start=$((i * chunk_bytes))
+        end=$((start + chunk_bytes - 1))
+        (( end >= CATBOOST_BYTES )) && end=$((CATBOOST_BYTES - 1))
+        expected=$((end - start + 1))
+        offset=$(stat -c '%s' "$part" 2>/dev/null || echo 0)
+        (( offset == expected )) && continue
+        download_part "$i" &
+        pids+=("$!")
+        if (( ${#pids[@]} >= jobs )); then
+          local batch_failed=0 pid
+          for pid in "${pids[@]}"; do wait "$pid" || batch_failed=1; done
+          pids=()
+          (( batch_failed == 0 )) || { echo "A parallel archive chunk failed; completed chunks were kept for resume." >&2; return 1; }
+        fi
+      done
+      if ((${#pids[@]})); then
+        local batch_failed=0 pid
+        for pid in "${pids[@]}"; do wait "$pid" || batch_failed=1; done
+        (( batch_failed == 0 )) || { echo "A parallel archive chunk failed; completed chunks were kept for resume." >&2; return 1; }
+      fi
+
+      local assembled="$CATBOOST_ARCHIVE.tmp"
+      cat "$part_dir"/part-*.bin > "$assembled"
+      [[ $(stat -c '%s' "$assembled") == "$CATBOOST_BYTES" ]] || {
+        echo "Archive byte count does not match the pinned source size." >&2; return 1;
+      }
+      [[ $(md5sum "$assembled" | awk '{print $1}') == "$CATBOOST_MD5" ]] || {
+        echo "CatBoost archive MD5 mismatch; keeping verified-size chunks for diagnosis/resume." >&2; rm -f "$assembled"; return 1;
+      }
+      mv "$assembled" "$CATBOOST_ARCHIVE"
+    fi
+  fi
+
+  [[ $(stat -c '%s' "$CATBOOST_ARCHIVE") == "$CATBOOST_BYTES" ]] || {
+    echo "CatBoost archive size mismatch." >&2; return 1;
+  }
+  [[ $(md5sum "$CATBOOST_ARCHIVE" | awk '{print $1}') == "$CATBOOST_MD5" ]] || {
+    echo "CatBoost archive MD5 mismatch." >&2; return 1;
+  }
+}
+
+if [[ -f "$LIBSVM_FILE" ]]; then
+  if bzip2 -t "$LIBSVM_FILE" 2>/dev/null; then validate_libsvm; exit 0; fi
 fi
-curl --fail --location --retry 5 --retry-delay 10 --continue-at - --output "$DEST" "$URL"
-bzip2 -t "$DEST"
-ls -lh "$DEST"
-echo "Validated bzip2 stream. Next: bin/stage epsilon"
+if [[ -f "$DATA/epsilon_train.tsv" ]]; then validate_tsv; exit 0; fi
+
+case $SOURCE in
+  auto|libsvm)
+    echo "Downloading the official LIBSVM Epsilon training archive..."
+    if curl --fail --location --retry 2 --retry-delay 5 --retry-all-errors \
+      --continue-at - --output "$LIBSVM_FILE" "$LIBSVM_URL"; then
+      validate_libsvm
+      exit 0
+    fi
+    if [[ $SOURCE == libsvm ]]; then exit 1; fi
+    rm -f "$LIBSVM_FILE"
+    echo "LIBSVM endpoint is unavailable; trying CatBoost's checksum-pinned LIBSVM conversion." >&2
+    ;;
+  catboost) echo "Using the CatBoost-hosted, checksum-pinned LIBSVM conversion." ;;
+  *) echo "Usage: EPSILON_SOURCE={auto|libsvm|catboost} $0" >&2; exit 2 ;;
+esac
+
+for tool in curl md5sum sha256sum tar awk; do
+  command -v "$tool" >/dev/null || { echo "Missing required tool: $tool" >&2; exit 1; }
+done
+download_catboost_archive
+
+EXTRACT="$DATA/.epsilon-extract"
+rm -rf "$EXTRACT"
+mkdir -p "$EXTRACT"
+tar -xzf "$CATBOOST_ARCHIVE" -C "$EXTRACT" --wildcards --no-anchored 'train.tsv'
+mapfile -t TRAIN_FILES < <(find "$EXTRACT" -type f -name train.tsv -print)
+[[ ${#TRAIN_FILES[@]} == 1 ]] || { echo "Expected one train.tsv in the verified archive." >&2; exit 1; }
+mv "${TRAIN_FILES[0]}" "$DATA/epsilon_train.tsv"
+rm -rf "$EXTRACT"
+validate_tsv
+if [[ ${EPSILON_KEEP_ARCHIVE:-0} != 1 ]]; then
+  rm -f "$CATBOOST_ARCHIVE"
+  rm -rf "$DATA/.epsilon-catboost-parts"
+fi
+echo "Ready. Next: bin/stage epsilon"

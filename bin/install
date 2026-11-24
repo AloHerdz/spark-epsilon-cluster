@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+source "$ROOT/bin/config.sh"
 ROLE=${1:-master}
 case $ROLE in master|worker) ;; *) echo "Usage: bin/install {master|worker}" >&2; exit 2 ;; esac
 
@@ -8,48 +9,43 @@ for tool in curl tar sha512sum sha256sum python3; do
   command -v "$tool" >/dev/null || { echo "Missing $tool. Install it with your Linux package manager." >&2; exit 1; }
 done
 
-if [[ -n ${JAVA_HOME:-} && -x "$JAVA_HOME/bin/java" ]]; then JAVA_BIN="$JAVA_HOME/bin/java";
-elif command -v java >/dev/null 2>&1; then JAVA_BIN=$(command -v java);
-elif [[ -x /home/krvin/code/restmex-2025-spark-scala-main/.runtime/jdk17/bin/java ]]; then
-  JAVA_HOME=/home/krvin/code/restmex-2025-spark-scala-main/.runtime/jdk17
-  JAVA_BIN="$JAVA_HOME/bin/java"
-  export JAVA_HOME
-else
-  echo "Java 17 or 21 is required. On Debian/Ubuntu: sudo apt install openjdk-17-jdk" >&2
-  exit 1
-fi
+PINNED_JAVA_VERSION=$(tr -d '[:space:]' < "$ROOT/conf/java-version")
+JAVA_BIN=${JAVA_HOME:+$JAVA_HOME/bin/java}
+JAVA_BIN=${JAVA_BIN:-$(command -v java || true)}
+[[ -x $JAVA_BIN ]] || { echo "Java $PINNED_JAVA_VERSION is required. Run bin/bootstrap-debian $ROLE." >&2; exit 1; }
 JAVA_VERSION=$($JAVA_BIN -version 2>&1 | sed -n '1s/.*version "\([0-9]*\).*/\1/p')
-if [[ ! $JAVA_VERSION =~ ^[0-9]+$ || $JAVA_VERSION -lt 17 ]]; then
-  echo "Spark 4.0.1 requires Java 17 or 21; found: $($JAVA_BIN -version 2>&1 | head -1)" >&2
+if [[ $JAVA_VERSION != "$PINNED_JAVA_VERSION" ]]; then
+  echo "This project pins Java $PINNED_JAVA_VERSION; found: $($JAVA_BIN -version 2>&1 | head -1)" >&2
   exit 1
 fi
+JAVA_HOME=${JAVA_HOME:-$(dirname "$(dirname "$(readlink -f "$JAVA_BIN")")")}
+export JAVA_HOME
 if [[ $ROLE == master ]]; then
-  JAVAC_BIN=${JAVAC:-${JAVA_HOME:+$JAVA_HOME/bin/javac}}
-  if [[ ! $JAVAC_BIN || ! -x $JAVAC_BIN ]]; then JAVAC_BIN=$(command -v javac || true); fi
-  if [[ ! $JAVAC_BIN || ! -x $JAVAC_BIN ]]; then
-    echo "A JDK is required on the master to compile the job. Install openjdk-17-jdk." >&2
+  if [[ ! -x $JAVA_HOME/bin/javac ]]; then
+    echo "A JDK is required on the master to compile the job. Run bin/bootstrap-debian master." >&2
     exit 1
   fi
-  export JAVAC="$JAVAC_BIN"
 fi
 
 VERSION=$(tr -d '[:space:]' < "$ROOT/conf/spark-version")
-[[ $VERSION =~ ^4\.0\.1$ ]] || { echo "Unsupported pinned Spark version: $VERSION" >&2; exit 1; }
+[[ $VERSION == 4.3.0 ]] || { echo "Unsupported pinned Spark version: $VERSION" >&2; exit 1; }
 ARCHIVE="spark-$VERSION-bin-hadoop3.tgz"
-BASE_URL="${SPARK_DOWNLOAD_BASE:-https://archive.apache.org/dist/spark/spark-$VERSION}"
+BASE_URL="${SPARK_DOWNLOAD_BASE:-https://downloads.apache.org/spark/spark-$VERSION}"
+CHECKSUM_URL="https://downloads.apache.org/spark/spark-$VERSION"
 CACHE="$ROOT/.cache/spark-$VERSION"
 JAR_DIR="$ROOT/runtime/jars"
 mkdir -p "$CACHE" "$JAR_DIR"
-if [[ ! -f "$ROOT/runtime/.spark-version" || $(cat "$ROOT/runtime/.spark-version") != "$VERSION" || ! -f "$JAR_DIR/spark-core_2.13-$VERSION.jar" ]]; then
+if [[ ! -f "$ROOT/runtime/.spark-version" || $(cat "$ROOT/runtime/.spark-version") != "$VERSION" || ! -f "$JAR_DIR/spark-core_2.13-$VERSION.jar" ]] || ! find "$JAR_DIR" -maxdepth 1 -name 'scala-compiler-2.13.*.jar' -print -quit | grep -q .; then
   curl --fail --location --retry 4 --retry-delay 5 --continue-at - \
     --output "$CACHE/$ARCHIVE" "$BASE_URL/$ARCHIVE"
   curl --fail --location --retry 4 --retry-delay 5 \
-    --output "$CACHE/$ARCHIVE.sha512" "$BASE_URL/$ARCHIVE.sha512"
+    --output "$CACHE/$ARCHIVE.sha512" "$CHECKSUM_URL/$ARCHIVE.sha512"
   (cd "$CACHE" && sha512sum -c "$ARCHIVE.sha512")
   mkdir -p "$CACHE/unpacked"
   tar -xzf "$CACHE/$ARCHIVE" -C "$CACHE/unpacked"
   SPARK_JARS="$CACHE/unpacked/spark-$VERSION-bin-hadoop3/jars"
-  [[ -d "$SPARK_JARS" && -f "$SPARK_JARS/spark-core_2.13-$VERSION.jar" ]] || {
+  SCALA_COMPILER=$(find "$SPARK_JARS" -maxdepth 1 -type f -name 'scala-compiler-2.13.*.jar' -print -quit)
+  [[ -d "$SPARK_JARS" && -f "$SPARK_JARS/spark-core_2.13-$VERSION.jar" && -n $SCALA_COMPILER ]] || {
     echo "The Apache archive did not contain the expected Spark $VERSION jars." >&2; exit 1;
   }
   find "$JAR_DIR" -maxdepth 1 -type f -name '*.jar' -delete
@@ -58,5 +54,5 @@ if [[ ! -f "$ROOT/runtime/.spark-version" || $(cat "$ROOT/runtime/.spark-version
   (cd "$ROOT/runtime" && sha256sum jars/*.jar > manifest.sha256)
 fi
 if [[ $ROLE == master ]]; then "$ROOT/bin/build"; fi
-echo "Ready for role=$ROLE with Spark $VERSION and Java $JAVA_VERSION."
+echo "Ready for role=$ROLE with Spark $VERSION, Scala 2.13, and Java $JAVA_VERSION."
 

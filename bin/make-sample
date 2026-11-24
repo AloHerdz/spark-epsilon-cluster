@@ -1,18 +1,12 @@
-#!/usr/bin/env python3
-"""Generate a deterministic LIBSVM smoke dataset with epsilon's feature count."""
-from pathlib import Path
-import sys
-
-rows = int(sys.argv[1]) if len(sys.argv) > 1 else 512
-if not 1 <= rows <= 100_000:
-    raise SystemExit("rows must be between 1 and 100000")
-out = Path(__file__).resolve().parents[1] / "data" / "sample.libsvm"
-out.parent.mkdir(parents=True, exist_ok=True)
-with out.open("w", encoding="ascii") as handle:
-    for i in range(rows):
-        label = "+1" if i % 2 == 0 else "-1"
-        values = " ".join(f"{j}:{((i * 17 + j * 31) % 2001 - 1000) / 1000:.3f}"
-                          for j in range(1, 2001))
-        handle.write(f"{label} {values}\n")
-print(f"{out} rows={rows} bytes={out.stat().st_size}")
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+source "$ROOT/bin/config.sh"
+ROWS=${1:-512}
+"$ROOT/bin/build" >/dev/null
+JAVA_BIN=${JAVA_HOME:+$JAVA_HOME/bin/java}
+JAVA_BIN=${JAVA_BIN:-$(command -v java || true)}
+[[ -x $JAVA_BIN ]] || { echo "Install the pinned Java version with bin/bootstrap-debian master." >&2; exit 1; }
+exec "$JAVA_BIN" -cp "$ROOT/build/epsilon-benchmark.jar:$ROOT/runtime/jars/*" MakeSample \
+  "$ROWS" "$ROOT/data/sample.libsvm"
 

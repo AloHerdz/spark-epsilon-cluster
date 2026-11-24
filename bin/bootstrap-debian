@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROLE=${1:-}
+case "$ROLE" in
+  master) PACKAGES=(git curl tar bzip2 rsync openssh-client python3 openjdk-21-jdk) ;;
+  worker) PACKAGES=(curl tar bzip2 rsync openssh-client python3 openjdk-21-jre-headless openssh-server) ;;
+  *) echo "Usage: bin/bootstrap-debian {master|worker}" >&2; exit 2 ;;
+esac
+sudo apt-get update
+sudo apt-get install -y "${PACKAGES[@]}"
+if [[ $ROLE == worker ]]; then
+  sudo systemctl enable --now ssh
+fi
+java -version
+echo "Debian/Ubuntu dependencies ready for role=$ROLE."

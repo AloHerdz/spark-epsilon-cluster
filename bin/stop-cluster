@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+source "$ROOT/bin/config.sh"
+mapfile -t WORKER_LIST < <(worker_aliases)
+for target in "${WORKER_LIST[@]}"; do
+  ssh -F "${SSH_CONFIG:-$HOME/.ssh/config}" "$target" \
+    'cd cluster-epsilon && bin/node stop-worker' || true
+done
+"$ROOT/bin/node" stop-worker
+"$ROOT/bin/node" stop-master

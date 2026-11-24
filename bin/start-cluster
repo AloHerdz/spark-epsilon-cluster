@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+source "$ROOT/bin/config.sh"
+: "${MASTER_HOST:?Set MASTER_HOST to the controller wired LAN address}"
+mapfile -t WORKER_LIST < <(worker_aliases)
+((${#WORKER_LIST[@]} > 0)) || { echo "Set at least one SSH alias in WORKER_HOSTS." >&2; exit 1; }
+
+for target in "${WORKER_LIST[@]}"; do
+  NODE_IP=$(worker_ip_for "$target") || { echo "Missing $target in WORKER_IPS." >&2; exit 1; }
+  [[ $NODE_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+    echo "Invalid LAN address for $target: $NODE_IP" >&2; exit 1;
+  }
+  "$ROOT/bin/sync-node" "$target"
+done
+
+MASTER_HOST=$MASTER_HOST "$ROOT/bin/node" start-master
+MASTER_HOST=$MASTER_HOST NODE_HOST=$MASTER_HOST \
+  WORKER_CORES=${LOCAL_CORES:-2} WORKER_MEMORY=${LOCAL_MEMORY:-2048m} \
+  "$ROOT/bin/node" start-worker
+
+for target in "${WORKER_LIST[@]}"; do
+  NODE_IP=$(worker_ip_for "$target")
+  ssh -F "${SSH_CONFIG:-$HOME/.ssh/config}" "$target" \
+    "cd cluster-epsilon && MASTER_HOST=$MASTER_HOST NODE_HOST=$NODE_IP WORKER_CORES=${WORKER_CORES:-2} WORKER_MEMORY=${WORKER_MEMORY:-2048m} bin/node start-worker"
+done
+
+EXPECTED=$((${#WORKER_LIST[@]} + 1))
+ready=false
+for _ in $(seq 1 45); do
+  if curl -fsS --max-time 2 "http://$MASTER_HOST:8080/json/" | \
+    python3 -c 'import json,sys; d=json.load(sys.stdin); n=sum(w.get("state")=="ALIVE" for w in d.get("workers", [])); sys.exit(0 if n>=int(sys.argv[1]) else 1)' "$EXPECTED" 2>/dev/null; then
+    ready=true
+    break
+  fi
+  sleep 2
+done
+if [[ $ready != true ]]; then
+  echo "ERROR: Spark master did not report $EXPECTED ALIVE workers within 90 seconds." >&2
+  exit 1
+fi
+echo "Cluster ready: $EXPECTED worker(s) registered."
+echo "Master UI: http://$MASTER_HOST:8080"
+for target in "${WORKER_LIST[@]}"; do
+  printf '%s worker UI: http://%s:8081\n' "$target" "$(worker_ip_for "$target")"
+done

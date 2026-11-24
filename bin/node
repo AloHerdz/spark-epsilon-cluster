@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+source "$ROOT/bin/config.sh"
 SPARK_HOME=/tmp/epsilon-spark
 export SPARK_HOME
 export SPARK_SCALA_VERSION=2.13
@@ -14,11 +15,9 @@ if [[ -L "$SPARK_HOME" && $(readlink "$SPARK_HOME") != "$ROOT/runtime" ]]; then
 fi
 [[ -L "$SPARK_HOME" ]] || ln -s "$ROOT/runtime" "$SPARK_HOME"
 if [[ -z ${JAVA_HOME:-} ]]; then
-  if command -v java >/dev/null 2>&1; then
-    JAVA_HOME=$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")
-  else
-    JAVA_HOME=/home/krvin/code/restmex-2025-spark-scala-main/.runtime/jdk17
-  fi
+  JAVA_BIN=$(command -v java || true)
+  [[ -n $JAVA_BIN ]] || { echo "Java is required; install it with bin/bootstrap-debian." >&2; exit 1; }
+  JAVA_HOME=$(dirname "$(dirname "$(readlink -f "$JAVA_BIN")")")
 fi
 export JAVA_HOME
 export SPARK_LOCAL_IP=${NODE_HOST:-${MASTER_HOST:-127.0.0.1}}

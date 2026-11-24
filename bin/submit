@@ -7,13 +7,22 @@ MODE=${1:-sample}
 case $MODE in
   sample)
     INPUT=file:///tmp/epsilon-cluster-data/sample.libsvm
+    FORMAT=libsvm
     PARTITIONS=${PARTITIONS:-8}
     HOLD_SECONDS=${HOLD_SECONDS:-12}
     REPARTITION=true
     EXPECTED_ROWS=${EXPECTED_ROWS:-512}
     ;;
   epsilon)
-    INPUT=file:///tmp/epsilon-cluster-data/epsilon_normalized.bz2
+    FORMAT=$(cat "$ROOT/data/epsilon.format" 2>/dev/null || true)
+    if [[ $FORMAT == libsvm && -f "$ROOT/data/epsilon_normalized.bz2" ]]; then
+      FILE=epsilon_normalized.bz2
+    elif [[ $FORMAT == tsv && -f "$ROOT/data/epsilon_train.tsv" ]]; then
+      FILE=epsilon_train.tsv
+    else
+      echo "No validated Epsilon data selected. Run bin/fetch-epsilon first." >&2; exit 1
+    fi
+    INPUT="file:///tmp/epsilon-cluster-data/$FILE"
     PARTITIONS=${PARTITIONS:-32}
     HOLD_SECONDS=0
     REPARTITION=false
@@ -23,18 +32,24 @@ case $MODE in
 esac
 INPUT=${INPUT_OVERRIDE:-$INPUT}
 [[ -f ${INPUT#file://} ]] || { echo "Missing input: ${INPUT#file://}" >&2; exit 1; }
-[[ -f "$ROOT/build/epsilon-audit.jar" ]] || "$ROOT/bin/build"
+[[ -f "$ROOT/build/epsilon-benchmark.jar" ]] || "$ROOT/bin/build"
+mapfile -t WORKER_LIST < <(worker_aliases)
+EXPECTED_HOSTS=$((${#WORKER_LIST[@]} + 1))
+WORKER_CORES=${WORKER_CORES:-2}
+CLUSTER_CORES=${CLUSTER_CORES:-$((${LOCAL_CORES:-2} + ${#WORKER_LIST[@]} * WORKER_CORES))}
+REQUIRED_HOSTS=${REQUIRED_HOSTS:-$EXPECTED_HOSTS}
+export CLUSTER_CORES REQUIRED_HOSTS
 export SPARK_HOME=/tmp/epsilon-spark
 export SPARK_LOCAL_IP=$MASTER_HOST
 exec "$SPARK_HOME/bin/spark-class" org.apache.spark.deploy.SparkSubmit \
   --master "spark://$MASTER_HOST:7077" --deploy-mode client \
   --class EpsilonAudit --driver-memory 1536m --executor-memory 768m \
-  --executor-cores 2 --total-executor-cores "${CLUSTER_CORES:-4}" \
+  --executor-cores "$WORKER_CORES" --total-executor-cores "$CLUSTER_CORES" \
   --conf "spark.driver.host=$MASTER_HOST" \
   --conf spark.driver.bindAddress=0.0.0.0 \
   --conf spark.driver.port=37071 \
   --conf spark.blockManager.port=37072 \
   --conf spark.ui.port=4040 \
   --conf spark.locality.wait=0s \
-  "$ROOT/build/epsilon-audit.jar" "$INPUT" "$PARTITIONS" "$HOLD_SECONDS" "$REPARTITION" \
-  "${REQUIRED_HOSTS:-2}" "$EXPECTED_ROWS"
+  "$ROOT/build/epsilon-benchmark.jar" "$INPUT" "$PARTITIONS" "$HOLD_SECONDS" \
+  "$REQUIRED_HOSTS" "$EXPECTED_ROWS" "$REPARTITION" "${FORMAT:-libsvm}"

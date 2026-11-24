@@ -5,15 +5,29 @@ source "$ROOT/bin/config.sh"
 MODE=${1:-sample}
 case $MODE in
   sample) FILE=sample.libsvm ;;
-  epsilon) FILE=epsilon_normalized.bz2 ;;
+  epsilon)
+    FORMAT=$(cat "$ROOT/data/epsilon.format" 2>/dev/null || true)
+    if [[ $FORMAT == libsvm && -f "$ROOT/data/epsilon_normalized.bz2" ]]; then
+      FILE=epsilon_normalized.bz2
+    elif [[ $FORMAT == tsv && -f "$ROOT/data/epsilon_train.tsv" ]]; then
+      FILE=epsilon_train.tsv
+    else
+      echo "No validated Epsilon data selected. Run bin/fetch-epsilon first." >&2; exit 1
+    fi
+    ;;
   *) echo "Usage: $0 {sample|epsilon}" >&2; exit 2 ;;
 esac
 [[ -f "$ROOT/data/$FILE" ]] || { echo "Missing $ROOT/data/$FILE" >&2; exit 1; }
+mapfile -t WORKER_LIST < <(worker_aliases)
+((${#WORKER_LIST[@]} > 0)) || { echo "Set at least one SSH alias in WORKER_HOSTS." >&2; exit 1; }
 mkdir -p /tmp/epsilon-cluster-data
 ln -sfn "$ROOT/data/$FILE" "/tmp/epsilon-cluster-data/$FILE"
-ssh -F "${SSH_CONFIG:-$HOME/.ssh/config}" "${HP_HOST:-hp}" 'mkdir -p "$HOME/cluster-epsilon/data"'
-rsync -a --partial -e "ssh -F ${SSH_CONFIG:-$HOME/.ssh/config}" "$ROOT/data/$FILE" "${HP_HOST:-hp}:cluster-epsilon/data/$FILE"
-ssh -F "${SSH_CONFIG:-$HOME/.ssh/config}" "${HP_HOST:-hp}" \
-  "mkdir -p /tmp/epsilon-cluster-data && ln -sfn \"\$HOME/cluster-epsilon/data/$FILE\" /tmp/epsilon-cluster-data/$FILE && ls -lh /tmp/epsilon-cluster-data/$FILE"
-echo "Staged $FILE on both nodes"
-
+for target in "${WORKER_LIST[@]}"; do
+  ssh -F "${SSH_CONFIG:-$HOME/.ssh/config}" "$target" \
+    'mkdir -p "$HOME/cluster-epsilon/data" /tmp/epsilon-cluster-data'
+  rsync -a --partial -e "ssh -F ${SSH_CONFIG:-$HOME/.ssh/config}" \
+    "$ROOT/data/$FILE" "$target:cluster-epsilon/data/$FILE"
+  ssh -F "${SSH_CONFIG:-$HOME/.ssh/config}" "$target" \
+    "ln -sfn \"\$HOME/cluster-epsilon/data/$FILE\" /tmp/epsilon-cluster-data/$FILE && ls -lh /tmp/epsilon-cluster-data/$FILE"
+done
+echo "Staged $FILE on controller and ${#WORKER_LIST[@]} worker(s)."
