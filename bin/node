@@ -14,6 +14,9 @@ if [[ -L "$SPARK_HOME" && $(readlink "$SPARK_HOME") != "$ROOT/runtime" ]]; then
   echo "ERROR: $SPARK_HOME points elsewhere" >&2; exit 1
 fi
 [[ -L "$SPARK_HOME" ]] || ln -s "$ROOT/runtime" "$SPARK_HOME"
+if [[ -z ${JAVA_HOME:-} && -x "$ROOT/runtime/jdk21/bin/java" ]]; then
+  JAVA_HOME="$ROOT/runtime/jdk21"
+fi
 if [[ -z ${JAVA_HOME:-} ]]; then
   JAVA_BIN=$(command -v java || true)
   [[ -n $JAVA_BIN ]] || { echo "Java is required; install it with bin/bootstrap-debian." >&2; exit 1; }

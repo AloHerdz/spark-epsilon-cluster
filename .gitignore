@@ -1,6 +1,7 @@
 runtime/jars/
 runtime/work/
 runtime/bin
+runtime/jdk21/
 runtime/manifest.sha256
 runtime/.spark-version
 build/
