@@ -19,6 +19,8 @@ case $MODE in
       FILE=epsilon_normalized.bz2
     elif [[ $FORMAT == tsv && -f "$ROOT/data/epsilon_train.tsv" ]]; then
       FILE=epsilon_train.tsv
+    elif [[ $FORMAT == parquet && -d "$ROOT/data/epsilon-parquet" ]]; then
+      FILE=epsilon-parquet
     else
       echo "No validated Epsilon data selected. Run bin/fetch-epsilon first." >&2; exit 1
     fi
@@ -31,7 +33,7 @@ case $MODE in
   *) echo "Usage: MASTER_HOST=IP $0 {sample|epsilon}" >&2; exit 2 ;;
 esac
 INPUT=${INPUT_OVERRIDE:-$INPUT}
-[[ -f ${INPUT#file://} ]] || { echo "Missing input: ${INPUT#file://}" >&2; exit 1; }
+[[ -e ${INPUT#file://} ]] || { echo "Missing input: ${INPUT#file://}" >&2; exit 1; }
 [[ -f "$ROOT/build/epsilon-benchmark.jar" ]] || "$ROOT/bin/build"
 mapfile -t WORKER_LIST < <(worker_aliases)
 EXPECTED_HOSTS=$((${#WORKER_LIST[@]} + 1))

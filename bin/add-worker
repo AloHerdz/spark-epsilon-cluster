@@ -18,6 +18,18 @@ for FILE in sample.libsvm epsilon_normalized.bz2; do
       "ln -sfn \"\$HOME/cluster-epsilon/data/$FILE\" /tmp/epsilon-cluster-data/$FILE"
   fi
 done
+if [[ $(cat "$ROOT/data/epsilon.format" 2>/dev/null || true) == tsv && -f "$ROOT/data/epsilon_train.tsv" ]]; then
+  rsync -a --partial -e "ssh -F ${SSH_CONFIG:-$HOME/.ssh/config}" \
+    "$ROOT/data/epsilon_train.tsv" "$TARGET:cluster-epsilon/data/"
+  ssh -F "${SSH_CONFIG:-$HOME/.ssh/config}" "$TARGET" \
+    'ln -sfn "$HOME/cluster-epsilon/data/epsilon_train.tsv" /tmp/epsilon-cluster-data/epsilon_train.tsv'
+fi
+if [[ $(cat "$ROOT/data/epsilon.format" 2>/dev/null || true) == parquet && -d "$ROOT/data/epsilon-parquet" ]]; then
+  rsync -a --partial -e "ssh -F ${SSH_CONFIG:-$HOME/.ssh/config}" \
+    "$ROOT/data/epsilon-parquet" "$TARGET:cluster-epsilon/data/"
+  ssh -F "${SSH_CONFIG:-$HOME/.ssh/config}" "$TARGET" \
+    'ln -sfn "$HOME/cluster-epsilon/data/epsilon-parquet" /tmp/epsilon-cluster-data/epsilon-parquet'
+fi
 ssh -F "${SSH_CONFIG:-$HOME/.ssh/config}" "$TARGET" \
   "cd cluster-epsilon && MASTER_HOST=$MASTER_HOST NODE_HOST=$NODE_IP WORKER_CORES=${WORKER_CORES:-2} WORKER_MEMORY=${WORKER_MEMORY:-1024m} bin/node start-worker"
 echo "Added worker $TARGET at $NODE_IP; submit with CLUSTER_CORES and REQUIRED_HOSTS adjusted."

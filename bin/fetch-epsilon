@@ -9,6 +9,11 @@ CATBOOST_ARCHIVE="$DATA/epsilon-catboost.tar.gz"
 CATBOOST_MD5=5bbfac403ac673da7d7ee84bd532e973
 CATBOOST_BYTES=${EPSILON_ARCHIVE_BYTES:-3862612309}
 SOURCE=${EPSILON_SOURCE:-auto}
+HF_REVISION=964bc24a366c0204aaab5c560cccb3d236b2495f
+HF_BASE="https://huggingface.co/datasets/jxie/epsilon/resolve/$HF_REVISION/data"
+HF_DIR="$DATA/epsilon-parquet"
+HF_MANIFEST="$ROOT/conf/epsilon-hf-train.tsv"
+export HF_REVISION HF_BASE HF_DIR
 mkdir -p "$DATA"
 
 validate_libsvm() {
@@ -31,6 +36,64 @@ validate_tsv() {
   printf 'tsv\n' > "$DATA/epsilon.format"
   echo "Validated CatBoost/LIBSVM TSV training split: $DATA/epsilon_train.tsv"
   ls -lh "$DATA/epsilon_train.tsv"
+}
+
+download_hf_shard() {
+  local name=$1 expected_size=$2 expected_sha=$3
+  local dest="$HF_DIR/$name" partial="$HF_DIR/$name.part" url actual_size actual_sha
+  url="$HF_BASE/$name"
+  if [[ -f $dest ]]; then
+    actual_size=$(stat -c '%s' "$dest")
+    actual_sha=$(sha256sum "$dest" | awk '{print $1}')
+    if [[ $actual_size == "$expected_size" && $actual_sha == "$expected_sha" ]]; then
+      echo "Verified existing $name"
+      return 0
+    fi
+    rm -f "$dest"
+  fi
+  if [[ -f $partial ]] && (( $(stat -c '%s' "$partial") > expected_size )); then
+    rm -f "$partial"
+  fi
+  if [[ -f $partial ]] && (( $(stat -c '%s' "$partial") == expected_size )); then
+    actual_sha=$(sha256sum "$partial" | awk '{print $1}')
+    if [[ $actual_sha == "$expected_sha" ]]; then
+      mv "$partial" "$dest"
+      echo "Verified $name ($expected_size bytes)"
+      return 0
+    fi
+    rm -f "$partial"
+  fi
+  echo "Downloading $name"
+  curl --fail --location --silent --show-error --retry 5 --retry-delay 3 --retry-all-errors \
+    --connect-timeout 30 --speed-time 90 --speed-limit 1024 --continue-at - \
+    --output "$partial" "$url"
+  actual_size=$(stat -c '%s' "$partial")
+  actual_sha=$(sha256sum "$partial" | awk '{print $1}')
+  [[ $actual_size == "$expected_size" && $actual_sha == "$expected_sha" ]] || {
+    echo "Checksum or size mismatch for $name ($actual_size bytes, sha256=$actual_sha)." >&2
+    return 1
+  }
+  mv "$partial" "$dest"
+  echo "Verified $name ($expected_size bytes)"
+}
+
+export -f download_hf_shard
+
+download_hf_parquet() {
+  local jobs=${EPSILON_DOWNLOAD_JOBS:-8}
+  [[ -r $HF_MANIFEST ]] || { echo "Missing checksum manifest: $HF_MANIFEST" >&2; return 1; }
+  mkdir -p "$HF_DIR"
+  echo "Fetching pinned Epsilon training shards from Hugging Face ($jobs parallel downloads)..."
+  if ! awk 'NF == 3 && $1 !~ /^#/ {print $1, $2, $3}' "$HF_MANIFEST" |
+    xargs -r -P "$jobs" -n 3 bash -c 'set -euo pipefail; download_hf_shard "$@"' _; then
+    echo "One or more Parquet shards failed; verified shards and partial downloads were kept for resume." >&2
+    return 1
+  fi
+  local count
+  count=$(find "$HF_DIR" -maxdepth 1 -type f -name 'train-*.parquet' | wc -l)
+  [[ $count == 20 ]] || { echo "Expected 20 verified Epsilon training shards, found $count." >&2; return 1; }
+  printf 'parquet\n' > "$DATA/epsilon.format"
+  echo "Verified all 20 Epsilon training Parquet shards in $HF_DIR"
 }
 
 download_catboost_archive() {
@@ -157,6 +220,14 @@ download_catboost_archive() {
   }
 }
 
+if [[ $SOURCE == huggingface ]]; then
+  download_hf_parquet
+  exit 0
+fi
+if [[ $SOURCE == auto && $(cat "$DATA/epsilon.format" 2>/dev/null || true) == parquet && -d "$HF_DIR" ]]; then
+  download_hf_parquet
+  exit 0
+fi
 if [[ -f "$LIBSVM_FILE" ]]; then
   if bzip2 -t "$LIBSVM_FILE" 2>/dev/null; then validate_libsvm; exit 0; fi
 fi
@@ -172,13 +243,18 @@ case $SOURCE in
     fi
     if [[ $SOURCE == libsvm ]]; then exit 1; fi
     rm -f "$LIBSVM_FILE"
-    echo "LIBSVM endpoint is unavailable; trying CatBoost's checksum-pinned LIBSVM conversion." >&2
+    echo "LIBSVM endpoint is unavailable; trying the pinned Hugging Face Parquet mirror." >&2
     ;;
   catboost) echo "Using the CatBoost-hosted, checksum-pinned LIBSVM conversion." ;;
-  *) echo "Usage: EPSILON_SOURCE={auto|libsvm|catboost} $0" >&2; exit 2 ;;
+  *) echo "Usage: EPSILON_SOURCE={auto|libsvm|huggingface|catboost} $0" >&2; exit 2 ;;
 esac
 
-for tool in curl md5sum sha256sum tar awk; do
+if [[ $SOURCE == auto ]]; then
+  if download_hf_parquet; then exit 0; fi
+  echo "Hugging Face download did not complete; falling back to CatBoost's checksum-pinned mirror." >&2
+fi
+
+for tool in curl md5sum sha256sum tar awk xargs; do
   command -v "$tool" >/dev/null || { echo "Missing required tool: $tool" >&2; exit 1; }
 done
 download_catboost_archive

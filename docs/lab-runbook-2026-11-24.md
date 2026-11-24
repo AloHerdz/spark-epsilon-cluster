@@ -85,7 +85,7 @@ bin/submit epsilon | tee results/epsilon-run.log
 bin/stop-cluster
 ```
 
-`bin/fetch-epsilon` first tries the LIBSVM BZip2 file. If that endpoint is down, it uses CatBoost's checksum-verified TSV conversion of the same Epsilon split. The full fetch and extraction need about 16 GiB free on the Razer; keep at least 10 GiB free on the ASUS for its staged data and runtime. The first download may take hours on a slow connection, so start it before the lab session if possible.
+`bin/fetch-epsilon` first tries the LIBSVM BZip2 file. If that endpoint is down, it uses 20 SHA-256-pinned Parquet training shards from Hugging Face; a ten-row spot comparison against CatBoost's LIBSVM-derived conversion matched all 2,000 feature values, with negative labels encoded as `0` instead of `-1`. These training shards total about 6.5 GB and Spark reads them directly. If that mirror is unavailable, the script falls back to CatBoost's checksum-verified TSV archive; allow about 16 GiB free on the Razer for that download and extraction. Keep at least 10 GiB free on the ASUS for staged data and the Spark runtime. Both sources resume partial downloads, so start the fetch before the lab session when possible.
 
 ## Observation
 

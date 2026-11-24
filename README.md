@@ -140,7 +140,7 @@ bin/submit epsilon | tee results/epsilon-run.log
 bin/stop-cluster
 ```
 
-The script first tries the official LIBSVM `epsilon_normalized.bz2` training file and checks its BZip2 stream. If that endpoint is unavailable, it can use CatBoost's checksum-pinned mirror of the same LIBSVM Epsilon training split, converted to tab-separated numeric rows; the 3.86 GB archive is verified against the MD5 published in CatBoost's dataset loader before extraction. `bin/stage epsilon` sends a local copy to each worker: this implementation uses a local `file:///` path on every machine rather than assuming a shared filesystem. The Scala job reads either LIBSVM or TSV, checks 400,000 rows and 2,000 features per row, and reports the hosts that processed partitions.
+The script first tries the official LIBSVM `epsilon_normalized.bz2` training file. If it is unavailable, it downloads the 20 training Parquet shards from a pinned Hugging Face revision and verifies each file's SHA-256 from [`conf/epsilon-hf-train.tsv`](conf/epsilon-hf-train.tsv). Parquet reads directly in Spark. A ten-row spot comparison against CatBoost's LIBSVM-derived copy matched all 2,000 features in each row; negative labels are encoded as `0` instead of `-1`, so this appears to be a converted copy of the same split. If Hugging Face is unavailable, the script falls back to CatBoost's checksum-pinned TSV archive. `bin/stage epsilon` sends the selected dataset to each worker and uses a local `file:///` path on every machine. The Scala job reads LIBSVM, TSV, or Parquet, checks 400,000 rows and 2,000 features per row, and reports the hosts that processed partitions.
 
 ## Monitoring and network
 
@@ -167,6 +167,7 @@ src/                    Scala processing and smoke-data programs
 bin/                    Setup, download, staging, monitoring, and run scripts
 conf/spark-version      Pinned Spark release
 conf/java-version       Pinned Java major version
+conf/epsilon-hf-train.tsv  Pinned Parquet shard sizes and checksums
 cluster.env.example     Local network configuration template
 data/                   Downloaded dataset and generated smoke data (ignored)
 runtime/                Downloaded Spark libraries and checksum manifest (ignored)
@@ -181,9 +182,9 @@ The one-session LAN addresses and command sequence are in [`docs/lab-runbook-202
 - System package versions can differ by distribution mirror and date; record `java -version`, `uname -a`, and each node's IP alongside experiment output.
 - Keep the generated `cluster.env`, dataset, Spark binaries, SSH keys, and private logs out of Git. `.gitignore` already excludes the local configuration and downloaded artifacts.
 - The smoke run uses 512 deterministic rows and requires at least two hosts. Epsilon uses the original 400,000-row training set.
-- The fallback TSV is a CatBoost-maintained, preprocessed conversion of the LIBSVM Epsilon training split. Both formats represent the 400,000 training rows and 2,000 features; only the storage encoding differs.
+- The CatBoost fallback is a checksum-pinned conversion of the LIBSVM Epsilon training split. The Hugging Face Parquet mirror is pinned by commit and per-file SHA-256; the first 10 rows were compared against the CatBoost conversion, with identical feature values and the negative-label mapping from `-1` to `0`.
 - To use another number of workers, add SSH aliases and update `WORKER_HOSTS` / `WORKER_IPS`; no script contains a machine-specific hostname.
 
 ## Data citation
 
-The training file is distributed by the LIBSVM dataset repository. Cite the original LIBSVM dataset page and preserve its terms when using the data: <https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/binary.html>.
+The original training set is documented by the [LIBSVM dataset repository](https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/binary.html). The faster Parquet mirror is the public [Hugging Face `jxie/epsilon` dataset](https://huggingface.co/datasets/jxie/epsilon), pinned to revision `964bc24a366c0204aaab5c560cccb3d236b2495f` with per-shard SHA-256 values in the manifest. Preserve the original dataset terms when using the data.

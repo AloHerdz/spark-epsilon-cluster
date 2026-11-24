@@ -2,6 +2,7 @@ import java.net.InetAddress
 import java.time.Instant
 import org.apache.spark.SparkContext
 import org.apache.spark.SparkConf
+import org.apache.spark.sql.{Row, SparkSession}
 
 /** Distributed, streaming audit of the LIBSVM Epsilon training set. */
 object EpsilonAudit {
@@ -18,7 +19,7 @@ object EpsilonAudit {
 
   private def usage(): Nothing = {
     System.err.println(
-      "Usage: EpsilonAudit <file:///absolute/path> [partitions] [hold-seconds] [required-hosts] [expected-rows] [repartition] [libsvm|tsv]")
+      "Usage: EpsilonAudit <file:///absolute/path> [partitions] [hold-seconds] [required-hosts] [expected-rows] [repartition] [libsvm|tsv|parquet]")
     System.exit(2)
     throw new IllegalStateException("unreachable")
   }
@@ -127,6 +128,57 @@ object EpsilonAudit {
     PartitionSummary(host, partition, rows, positive, negative, features, invalid, sumSquares, maxIndex)
   }
 
+  private def scanParquetPartition(
+      partition: Int,
+      rows: Iterator[Row],
+      holdSeconds: Int,
+      inputIndex: Int,
+      labelIndex: Int): PartitionSummary = {
+    val host = InetAddress.getLocalHost.getHostName
+    var rowCount = 0L
+    var positive = 0L
+    var negative = 0L
+    var features = 0L
+    var invalid = 0L
+    var sumSquares = 0.0
+
+    while (rows.hasNext) {
+      val row = rows.next()
+      try {
+        val label = row.getLong(labelIndex).toDouble
+        val values = row.getSeq[Seq[Double]](inputIndex)
+        val validLabel = label == 1.0 || label == 0.0 || label == -1.0
+        var validValues = values != null && values.length == 2000
+        var rowSquares = 0.0
+        if (validValues) {
+          val featureIterator = values.iterator
+          while (featureIterator.hasNext && validValues) {
+            val feature = featureIterator.next()
+            if (feature == null || feature.length != 1 || !java.lang.Double.isFinite(feature.head)) {
+              validValues = false
+            } else {
+              val value = feature.head
+              rowSquares += value * value
+            }
+          }
+        }
+        if (!validLabel || !validValues) {
+          invalid += 1
+        } else {
+          rowCount += 1
+          if (label == 1.0) positive += 1 else negative += 1
+          features += 2000
+          sumSquares += rowSquares
+        }
+      } catch {
+        case _: Exception => invalid += 1
+      }
+    }
+
+    if (holdSeconds > 0) Thread.sleep(holdSeconds.toLong * 1000L)
+    PartitionSummary(host, partition, rowCount, positive, negative, features, invalid, sumSquares, 2000)
+  }
+
   def main(args: Array[String]): Unit = {
     if (args.length < 1 || args.length > 7 || !args(0).startsWith("file:///")) usage()
     val input = args(0)
@@ -137,21 +189,34 @@ object EpsilonAudit {
     val repartition = args.length > 5 && args(5).toBoolean
     val format = if (args.length > 6) args(6) else "libsvm"
     if (partitions < 2 || holdSeconds < 0 || requiredHosts < 1 || expectedRows < 0 ||
-        !(format == "libsvm" || format == "tsv")) usage()
+        !(format == "libsvm" || format == "tsv" || format == "parquet")) usage()
 
     val started = Instant.now().toString
     val start = System.nanoTime()
     val conf = new SparkConf().setAppName("Epsilon distributed data audit")
-    val sc = new SparkContext(conf)
+    val spark = SparkSession.builder().config(conf).getOrCreate()
+    val sc = spark.sparkContext
     var failed = false
     try {
       sc.setLogLevel("WARN")
-      val rawSource = sc.textFile(input, partitions)
-      val source = if (repartition) rawSource.repartition(partitions) else rawSource
-      val results = source.mapPartitionsWithIndex(
-        (index, lines) => Iterator.single(scanPartition(index, lines, holdSeconds, format)))
-        .collect()
-        .toSeq
+      val results: Seq[PartitionSummary] = if (format == "parquet") {
+        val frame = spark.read.parquet(input)
+        val inputIndex = frame.schema.fieldIndex("inputs")
+        val labelIndex = frame.schema.fieldIndex("label")
+        val rawSource = frame.rdd
+        val source = if (repartition) rawSource.repartition(partitions) else rawSource.coalesce(partitions)
+        source.mapPartitionsWithIndex(
+          (index, rows) => Iterator.single(scanParquetPartition(index, rows, holdSeconds, inputIndex, labelIndex)))
+          .collect()
+          .toSeq
+      } else {
+        val rawSource = sc.textFile(input, partitions)
+        val source = if (repartition) rawSource.repartition(partitions) else rawSource
+        source.mapPartitionsWithIndex(
+          (index, lines) => Iterator.single(scanPartition(index, lines, holdSeconds, format)))
+          .collect()
+          .toSeq
+      }
 
       val rows = results.map(_.rows).sum
       val positive = results.map(_.positive).sum
@@ -173,7 +238,7 @@ object EpsilonAudit {
           s"CHECK FAILED: invalid=$invalid rows=$rows expectedRows=$expectedRows hosts=${hosts.size} requiredHosts=$requiredHosts")
       }
     } finally {
-      sc.stop()
+      spark.stop()
     }
     if (failed) System.exit(3)
   }
