@@ -174,7 +174,7 @@ runtime/                Downloaded Spark libraries and checksum manifest (ignore
 results/                Local run logs (ignored)
 ```
 
-The one-session LAN addresses and command sequence are in [`docs/lab-runbook-2026-11-24.md`](docs/lab-runbook-2026-11-24.md); reusable SSH setup is in [`docs/ssh-access.md`](docs/ssh-access.md). The reusable cluster configuration remains generic in `cluster.env.example`.
+The reproducible lab sequence is in [`docs/lab-runbook.md`](docs/lab-runbook.md); reusable SSH setup is in [`docs/ssh-access.md`](docs/ssh-access.md). Host-specific addresses and aliases stay in the ignored local `cluster.env`.
 
 ## Reproducibility notes
 
