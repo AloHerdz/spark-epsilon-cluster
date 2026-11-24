@@ -8,7 +8,7 @@ case $MODE in
   sample)
     INPUT=file:///tmp/epsilon-cluster-data/sample.libsvm
     FORMAT=libsvm
-    PARTITIONS=${PARTITIONS:-8}
+    PARTITIONS=${PARTITIONS:-32}
     HOLD_SECONDS=${HOLD_SECONDS:-12}
     REPARTITION=true
     EXPECTED_ROWS=${EXPECTED_ROWS:-512}
@@ -37,9 +37,15 @@ INPUT=${INPUT_OVERRIDE:-$INPUT}
 [[ -f "$ROOT/build/epsilon-benchmark.jar" ]] || "$ROOT/bin/build"
 mapfile -t WORKER_LIST < <(worker_aliases)
 EXPECTED_HOSTS=$((${#WORKER_LIST[@]} + 1))
+if [[ -z ${REQUIRED_HOSTS:-} ]]; then
+  if [[ $MODE == sample ]]; then
+    REQUIRED_HOSTS=2
+  else
+    REQUIRED_HOSTS=$EXPECTED_HOSTS
+  fi
+fi
 WORKER_CORES=${WORKER_CORES:-2}
 CLUSTER_CORES=${CLUSTER_CORES:-$((${LOCAL_CORES:-2} + ${#WORKER_LIST[@]} * WORKER_CORES))}
-REQUIRED_HOSTS=${REQUIRED_HOSTS:-$EXPECTED_HOSTS}
 export CLUSTER_CORES REQUIRED_HOSTS
 export SPARK_HOME=/tmp/epsilon-spark
 export SPARK_LOCAL_IP=$MASTER_HOST
@@ -47,6 +53,7 @@ exec "$SPARK_HOME/bin/spark-class" org.apache.spark.deploy.SparkSubmit \
   --master "spark://$MASTER_HOST:7077" --deploy-mode client \
   --class EpsilonAudit --driver-memory 1536m --executor-memory 768m \
   --executor-cores "$WORKER_CORES" --total-executor-cores "$CLUSTER_CORES" \
+  --conf spark.scheduler.minRegisteredResourcesRatio=1.0 \
   --conf "spark.driver.host=$MASTER_HOST" \
   --conf spark.driver.bindAddress=0.0.0.0 \
   --conf spark.driver.port=37071 \
