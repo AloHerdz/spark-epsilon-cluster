@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+source "$ROOT/bin/config.sh"
+ssh -F "${SSH_CONFIG:-$HOME/.ssh/config}" "${HP_HOST:-hp}" 'cd cluster-epsilon && bin/node stop-worker' || true
+"$ROOT/bin/node" stop-worker
+"$ROOT/bin/node" stop-master
+

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+TARGET=${1:?Usage: bin/sync-node ssh-alias}
+ssh -F "${SSH_CONFIG:-$HOME/.ssh/config}" "$TARGET" 'mkdir -p "$HOME/cluster-epsilon"'
+rsync -a --exclude='.git/' --exclude='.cache/' --exclude='results/' --exclude='logs/' --exclude='cluster.env' \
+  --exclude='data/' --exclude='runtime/work/' \
+  -e "ssh -F ${SSH_CONFIG:-$HOME/.ssh/config}" "$ROOT/" "$TARGET:cluster-epsilon/"
+echo "Project and Spark $([[ -f "$ROOT/runtime/.spark-version" ]] && cat "$ROOT/runtime/.spark-version" || echo runtime) synced to $TARGET"
+

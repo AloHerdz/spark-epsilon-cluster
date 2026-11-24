@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+source "$ROOT/bin/config.sh"
+: "${MASTER_HOST:?Set MASTER_HOST to master LAN IP}"
+MODE=${1:-sample}
+case $MODE in
+  sample)
+    INPUT=file:///tmp/epsilon-cluster-data/sample.libsvm
+    PARTITIONS=${PARTITIONS:-8}
+    HOLD_SECONDS=${HOLD_SECONDS:-12}
+    REPARTITION=true
+    EXPECTED_ROWS=${EXPECTED_ROWS:-512}
+    ;;
+  epsilon)
+    INPUT=file:///tmp/epsilon-cluster-data/epsilon_normalized.bz2
+    PARTITIONS=${PARTITIONS:-32}
+    HOLD_SECONDS=0
+    REPARTITION=false
+    EXPECTED_ROWS=${EXPECTED_ROWS:-400000}
+    ;;
+  *) echo "Usage: MASTER_HOST=IP $0 {sample|epsilon}" >&2; exit 2 ;;
+esac
+INPUT=${INPUT_OVERRIDE:-$INPUT}
+[[ -f ${INPUT#file://} ]] || { echo "Missing input: ${INPUT#file://}" >&2; exit 1; }
+[[ -f "$ROOT/build/epsilon-audit.jar" ]] || "$ROOT/bin/build"
+export SPARK_HOME=/tmp/epsilon-spark
+export SPARK_LOCAL_IP=$MASTER_HOST
+exec "$SPARK_HOME/bin/spark-class" org.apache.spark.deploy.SparkSubmit \
+  --master "spark://$MASTER_HOST:7077" --deploy-mode client \
+  --class EpsilonAudit --driver-memory 1536m --executor-memory 768m \
+  --executor-cores 2 --total-executor-cores "${CLUSTER_CORES:-4}" \
+  --conf "spark.driver.host=$MASTER_HOST" \
+  --conf spark.driver.bindAddress=0.0.0.0 \
+  --conf spark.driver.port=37071 \
+  --conf spark.blockManager.port=37072 \
+  --conf spark.ui.port=4040 \
+  --conf spark.locality.wait=0s \
+  "$ROOT/build/epsilon-audit.jar" "$INPUT" "$PARTITIONS" "$HOLD_SECONDS" "$REPARTITION" \
+  "${REQUIRED_HOSTS:-2}" "$EXPECTED_ROWS"

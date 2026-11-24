@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+source "$ROOT/bin/config.sh"
+: "${MASTER_HOST:?Set MASTER_HOST to master LAN IP}"
+curl -fsS "http://$MASTER_HOST:8080/json/" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+print("Master:", d.get("url"), "status:", d.get("status"))
+for w in d.get("workers", []):
+    print("Worker:", w.get("host"), w.get("state"), "cores:", w.get("cores"), "used:", w.get("coresused"))
+for a in d.get("activeapps", []):
+    print("Application:", a.get("id"), a.get("name"))
+'
+echo "TCP connections to master or HP:"
+ss -tn | awk -v master="$MASTER_HOST" -v hp="${HP_NODE_HOST:-}" \
+  'NR==1 || (hp != "" && index($0,master) && index($0,hp)) || (hp == "" && index($0,master))'

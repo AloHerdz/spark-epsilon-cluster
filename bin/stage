@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+source "$ROOT/bin/config.sh"
+MODE=${1:-sample}
+case $MODE in
+  sample) FILE=sample.libsvm ;;
+  epsilon) FILE=epsilon_normalized.bz2 ;;
+  *) echo "Usage: $0 {sample|epsilon}" >&2; exit 2 ;;
+esac
+[[ -f "$ROOT/data/$FILE" ]] || { echo "Missing $ROOT/data/$FILE" >&2; exit 1; }
+mkdir -p /tmp/epsilon-cluster-data
+ln -sfn "$ROOT/data/$FILE" "/tmp/epsilon-cluster-data/$FILE"
+ssh -F "${SSH_CONFIG:-$HOME/.ssh/config}" "${HP_HOST:-hp}" 'mkdir -p "$HOME/cluster-epsilon/data"'
+rsync -a --partial -e "ssh -F ${SSH_CONFIG:-$HOME/.ssh/config}" "$ROOT/data/$FILE" "${HP_HOST:-hp}:cluster-epsilon/data/$FILE"
+ssh -F "${SSH_CONFIG:-$HOME/.ssh/config}" "${HP_HOST:-hp}" \
+  "mkdir -p /tmp/epsilon-cluster-data && ln -sfn \"\$HOME/cluster-epsilon/data/$FILE\" /tmp/epsilon-cluster-data/$FILE && ls -lh /tmp/epsilon-cluster-data/$FILE"
+echo "Staged $FILE on both nodes"
+

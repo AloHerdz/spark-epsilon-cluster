@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SPARK_HOME=${SPARK_HOME:-/tmp/epsilon-spark}
+export SPARK_SCALA_VERSION=${SPARK_SCALA_VERSION:-2.13}
+if [[ -n ${JAVA_HOME:-} ]]; then
+  JAVA_BIN="$JAVA_HOME/bin/java"
+else
+  JAVA_BIN=$(command -v java)
+fi
+exec "$JAVA_BIN" ${SPARK_JAVA_OPTS:-} -Dspark.home="$SPARK_HOME" -cp "$SPARK_HOME/jars/*" "$@"
+

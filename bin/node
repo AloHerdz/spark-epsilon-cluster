@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+SPARK_HOME=/tmp/epsilon-spark
+export SPARK_HOME
+export SPARK_SCALA_VERSION=2.13
+mkdir -p "$ROOT/logs" "$ROOT/runtime" /tmp/epsilon-cluster-data
+[[ -e "$ROOT/runtime/bin" ]] || ln -s ../bin "$ROOT/runtime/bin"
+if [[ -e "$SPARK_HOME" && ! -L "$SPARK_HOME" ]]; then
+  echo "ERROR: $SPARK_HOME already exists and is not a symlink" >&2; exit 1
+fi
+if [[ -L "$SPARK_HOME" && $(readlink "$SPARK_HOME") != "$ROOT/runtime" ]]; then
+  echo "ERROR: $SPARK_HOME points elsewhere" >&2; exit 1
+fi
+[[ -L "$SPARK_HOME" ]] || ln -s "$ROOT/runtime" "$SPARK_HOME"
+if [[ -z ${JAVA_HOME:-} ]]; then
+  if command -v java >/dev/null 2>&1; then
+    JAVA_HOME=$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")
+  else
+    JAVA_HOME=/home/krvin/code/restmex-2025-spark-scala-main/.runtime/jdk17
+  fi
+fi
+export JAVA_HOME
+export SPARK_LOCAL_IP=${NODE_HOST:-${MASTER_HOST:-127.0.0.1}}
+
+running() { [[ -s "$ROOT/logs/$1.pid" ]] && kill -0 "$(cat "$ROOT/logs/$1.pid")" 2>/dev/null; }
+start() {
+  local name=$1; shift
+  if running "$name"; then echo "$name already running PID=$(cat "$ROOT/logs/$name.pid")"; return; fi
+  nohup "$SPARK_HOME/bin/spark-class" "$@" >"$ROOT/logs/$name.log" 2>&1 </dev/null &
+  echo $! >"$ROOT/logs/$name.pid"
+  sleep 2
+  if running "$name"; then echo "$name started PID=$(cat "$ROOT/logs/$name.pid")"; else
+    tail -35 "$ROOT/logs/$name.log" >&2; exit 1
+  fi
+}
+stop() {
+  local name=$1
+  if running "$name"; then kill "$(cat "$ROOT/logs/$name.pid")"; echo "$name stopped"; fi
+  rm -f "$ROOT/logs/$name.pid"
+}
+case ${1:-} in
+  start-master)
+    : "${MASTER_HOST:?Set MASTER_HOST to local LAN IP}"
+    start master org.apache.spark.deploy.master.Master --host "$MASTER_HOST" --port 7077 --webui-port 8080
+    ;;
+  start-worker)
+    : "${MASTER_HOST:?Set MASTER_HOST to master LAN IP}"
+    : "${NODE_HOST:?Set NODE_HOST to local LAN IP}"
+    start worker org.apache.spark.deploy.worker.Worker --host "$NODE_HOST" --port 7078 --webui-port 8081 \
+      --cores "${WORKER_CORES:-2}" --memory "${WORKER_MEMORY:-1024m}" \
+      --work-dir "$ROOT/runtime/work" "spark://$MASTER_HOST:7077"
+    ;;
+  stop-master) stop master ;;
+  stop-worker) stop worker ;;
+  status)
+    for service in master worker; do
+      if running "$service"; then echo "$service RUNNING PID=$(cat "$ROOT/logs/$service.pid")"; else echo "$service STOPPED"; fi
+    done
+    ;;
+  *) echo "Usage: MASTER_HOST=IP NODE_HOST=IP $0 {start-master|start-worker|stop-master|stop-worker|status}" >&2; exit 2 ;;
+esac
+

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+DEST="$ROOT/data/epsilon_normalized.bz2"
+URL=https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/binary/epsilon_normalized.bz2
+mkdir -p "$ROOT/data"
+if [[ -f "$DEST" ]] && bzip2 -t "$DEST"; then
+  echo "Already downloaded and valid: $DEST"
+  exit 0
+fi
+curl --fail --location --retry 5 --retry-delay 10 --continue-at - --output "$DEST" "$URL"
+bzip2 -t "$DEST"
+ls -lh "$DEST"
+echo "Validated bzip2 stream. Next: bin/stage epsilon"

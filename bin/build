@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+JAVAC=${JAVAC:-/home/krvin/code/restmex-2025-spark-scala-main/.runtime/jdk17/bin/javac}
+JAR=${JAR:-/home/krvin/code/restmex-2025-spark-scala-main/.runtime/jdk17/bin/jar}
+if [[ ! -x $JAVAC || ! -x $JAR ]]; then
+  JAVAC=$(command -v javac)
+  JAR=$(command -v jar)
+fi
+mkdir -p "$ROOT/build/classes"
+"$JAVAC" -cp "$ROOT/runtime/jars/*" -d "$ROOT/build/classes" "$ROOT/src/EpsilonAudit.java"
+"$JAR" cf "$ROOT/build/epsilon-audit.jar" -C "$ROOT/build/classes" .
+echo "$ROOT/build/epsilon-audit.jar"
+
