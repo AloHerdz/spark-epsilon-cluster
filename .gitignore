@@ -1,0 +1,14 @@
+runtime/jars/
+runtime/work/
+runtime/bin
+runtime/manifest.sha256
+runtime/.spark-version
+build/
+data/*
+!data/.gitkeep
+results/
+logs/
+.cache/
+__pycache__/
+cluster.env
+
