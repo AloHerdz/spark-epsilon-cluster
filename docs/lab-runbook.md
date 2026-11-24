@@ -15,6 +15,8 @@ On the controller, create the ignored local configuration and edit it with the r
 cp cluster.env.example cluster.env
 ```
 
+Replace every value in angle brackets below before using the configuration.
+
 For example, the shape of a three-worker configuration is:
 
 ```bash
